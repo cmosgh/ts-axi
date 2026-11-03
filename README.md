@@ -37,7 +37,15 @@ help[5]:
 
 Read-only: no lint, no refactor, no rename.
 
-> **Status: early (v0.1.x).**
+## Status (v0.1.4)
+
+Early, but already used in real reviews. What the numbers say so far:
+
+- **Correctness on the test corpus.** 146 unit and command tests over three synthetic fixtures (a TS project with an interface and three implementations, an Nx-style workspace with `tsconfig.base.json` paths and a pnpm workspace, a script-style JavaScript tree), plus 39 integration tests that run the built binary against a vendored Astro + React one-pager (`test/integration/sample`: barrel re-exports, JSX islands, custom hooks, a JS consumer of a TS export, a `.ts-axi.json` test glob). They pin exact line numbers, reference counts, test counts, change classes and the interface split.
+- **A real monorepo** (Nx, 142 projects, ~5.4k source files after gitignore): `refs` on a service method finds its two callers in *another* project in 3-5 s without any flag; `impact` on a 7-file commit reports 15 changes with cross-project references in ~5 s; `callers` on a method that implements an interface shared by seven classes reports the 1 direct call plus the spec calls, where the raw compiler API returned 8 unrelated implementations. Before the workspace scope, the same `impact` ran out of memory.
+- **Against grep, in characters an agent has to read** (same monorepo, measured by a reviewer session): `callers` 720 vs ~3.5k for the two greps a reviewer needs - and grep still leaves the interface ambiguity to the human; `impact` on a commit 4.7k vs ~7.3k for per-symbol greps plus the `git show --stat` needed to learn the symbol list. `def` on a very common name was *worse* than grep until nested git worktrees were excluded (96 matches, 92 of them copies); it is 4 now.
+
+Known limits: `.astro` / `.vue` / `.svelte` files are not analysed (they appear under `skipped`, and `--grep` searches them textually); every semantic command starts cold (0.3 s on a small project, 2-5 s on the monorepo, dominated by the library `.d.ts` files that barrels pull in); import specifiers are extracted textually, so computed specifiers and bundler-only aliases are missed.
 
 ## Install
 
@@ -73,7 +81,99 @@ npx skills add cmosgh/ts-axi --skill ts-axi
 
 `ts-axi <command> --help` prints a concise, complete flag reference. `-P <tsconfig>` selects a project on any command that may analyse types; `--json` prints the decoded payload.
 
-<!-- TODO(phase 4): paste real examples for def / refs / outline / config from the fixture project. -->
+### A review, end to end
+
+```sh
+ts-axi                                  # which project, how many files, how many are tests
+ts-axi impact main...HEAD               # what the branch changes and who depends on it
+ts-axi callers src/lib/format.ts:5      # the risky symbol: every call site with its enclosing function
+ts-axi def src/lib/cart.ts:32           # read one declaration, numbered for inline comments
+ts-axi outline src/lib/cart.ts          # the rest of the file, without reading it
+```
+
+Real output from the sample project (`test/integration/sample`):
+
+```
+$ ts-axi callers formatPrice
+symbol: formatPrice
+kind: function
+declared_at: "src/lib/format.ts:5"
+refs_total: 7
+files: 6
+tests: 2
+refs[7]{file,line,caller,context}:
+  src/components/Counter.tsx,12,Counter,"{cups} cups = {formatPrice(cups * CUP_CENTS)}"
+  src/components/ProductCard.tsx,13,ProductCard,"<p>{formatPrice(item.priceCents)}</p>"
+  src/lib/analytics.js,4,trackPurchase,"return { event: 'purchase', value: formatPrice(cents, 'EUR') };"
+  src/lib/cart.it.ts,8,(top-level),expect(cart.total()).toBe(formatPrice(3700));
+  src/lib/cart.ts,34,Cart.total,return formatPrice(cents);
+  src/lib/format.test.ts,6,(top-level),expect(formatPrice(1850)).toBe('18.50 USD');
+  src/lib/format.test.ts,9,(top-level),"expect(formatPrice(305, 'EUR')).toBe('3.05 EUR');"
+elapsed_ms: 549
+```
+
+```
+$ ts-axi def Cart.total
+file: src/lib/cart.ts
+line: 32
+kind: method
+exported: true
+signature: "total(): string"
+body:
+---
+  32 |   total(): string {
+  33 |     const cents = this.items.reduce((sum, i) => sum + i.priceCents * i.qty, 0);
+  34 |     return formatPrice(cents);
+  35 |   }
+---
+```
+
+The line numbers in front of the body are file lines, so an agent can cite or comment on them directly. An ambiguous name lists the candidates and the exact commands that narrow them:
+
+```
+$ ts-axi def parse
+symbol: parse
+matches[2]{file,line,kind,exported,signature}:
+  src/lib/parse.ts,1,function,true,"export function parse(input: string): number"
+  src/lib/query.ts,1,function,true,"export function parse(q: string): Record<string, string>"
+help[4]:
+  - "Run `ts-axi def src/lib/parse.ts:1` for the one in src/lib/parse.ts"
+  - "Run `ts-axi def src/lib/query.ts:1` for the one in src/lib/query.ts"
+  ...
+```
+
+### Interfaces are not conflated
+
+`findReferences` in the compiler resolves a call like `parser.parse(raw)` (with `parser: FieldParser`) to every implementation of `parse`, and lists the other implementations' declarations as references. For a review that inflates the blast radius badly. ts-axi keeps the split:
+
+```
+$ ts-axi callers DateParser.parse
+symbol: DateParser.parse
+refs_total: 1
+via_interface: 1 (FieldParser.parse)
+refs[1]{file,line,caller,context}:
+  src/services/dates.ts,4,dayOf,return new DateParser().parse(x);
+
+$ ts-axi refs FieldParser.parse
+refs_total: 1
+via_implementations: 1 (DateParser.parse)
+implementations: 3
+refs[1]{file,line,context}:
+  src/parsers/registry.ts,5,return parser.parse(raw);
+```
+
+### Script-style JavaScript
+
+```
+$ ts-axi outline client/app.js
+decls[4]{line,kind,name,exported,signature}:
+  6,function,CartCtrl,true,"controller CartCtrl($scope, priceService)"
+  12,function,priceService,true,service priceService()
+  13,method,priceService.sum,true,this.sum = function (items)
+  17,function,cartBadge,true,directive cartBadge()
+```
+
+An edit inside `CartCtrl` is reported by `impact` as `CartCtrl body`, not as a file-level change. Names registered by a string have no identifier the checker can follow; `refs` says so and offers `--grep`.
 
 ## Monorepos
 
@@ -128,7 +228,17 @@ corepack pnpm install
 corepack pnpm run check   # typecheck, tests, build, skill freshness
 ```
 
-`skills/ts-axi/SKILL.md` is generated: `corepack pnpm run build:skill`. See `PLAN.md` for the spec and `GLOSSARY.md` for the vocabulary.
+`skills/ts-axi/SKILL.md` is generated: `corepack pnpm run build:skill`. See `PLAN.md` for the spec, `GLOSSARY.md` for the vocabulary and `docs/adr/` for the two engine decisions (TypeScript LanguageService over ts-morph / tree-sitter; importer subgraph over a configured project list).
+
+### Tests
+
+| Suite | Runs | Covers |
+| --- | --- | --- |
+| `test/unit.test.ts`, `test/workspace.test.ts` | `pnpm test` | target parsing, signatures, change classification, diff parsing, settings, glob matching, reference classification, workspace detection, import resolution |
+| `test/commands.test.ts` | `pnpm test` | the whole CLI through `main()` over three fixtures copied to temp git repos: `test/fixtures/project` (TS, interface + implementations, barrel, JS consumer, `any` access), `test/fixtures/workspace` (Nx + pnpm workspace, `paths`, references-only tsconfigs), `test/fixtures/legacy-js` (AngularJS, Meteor, prototype, IIFE, CommonJS) |
+| `test/integration/*.test.ts` | `pnpm run test:integration` | the built binary against the vendored Astro + React sample in `test/integration/sample` (installs its own dependencies once; copied to a temp git repo per run, see `test/integration/README.md`) |
+
+CI runs the first two on Node 22 and 24, the built CLI on Node 20, and the integration suite on Node 24.
 
 ## License
 
