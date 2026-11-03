@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 import { usageError } from "./errors.js";
+import { classifyReferenceGroups, type GroupDescriptor, type RefDescriptor, type Through } from "./references.js";
 import { collectDeclarations, type Declaration } from "./symbols.js";
 
 export const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"] as const;
@@ -183,6 +184,69 @@ export function relPath(root: string, abs: string): string {
   return relative(root, abs).split(sep).join("/");
 }
 
+function declMatches(decl: Declaration, query: NameQuery): boolean {
+  const needle = query.fuzzy ? query.name.toLowerCase() : query.name;
+  if (query.member !== undefined) {
+    if (decl.parentName === undefined) return false;
+    const parent = decl.parentName.split(".").pop()!;
+    return query.fuzzy
+      ? parent.toLowerCase().includes(needle) && decl.name.toLowerCase().includes(query.member.toLowerCase())
+      : parent === query.name && decl.name === query.member;
+  }
+  return query.fuzzy ? decl.name.toLowerCase().includes(needle) : decl.name === query.name;
+}
+
+// Same bounds as the home view's walk: this runs on an empty result, it must stay cheap.
+const OUTSIDE_WALK_CAP = 20_000;
+const OUTSIDE_WALK_MS = 600;
+
+/**
+ * Declarations matching `query` in source files below the repo root that are not in the Project
+ * (syntactic, bounded by file count and time; stops after `max` hits).
+ */
+export function findOutsideProject(index: SyntacticIndex, query: NameQuery, max = 3): Declaration[] {
+  const inProject = new Set(index.files);
+  const deadline = Date.now() + OUTSIDE_WALK_MS;
+  const hits: Declaration[] = [];
+  const stack = [index.root];
+  let visited = 0;
+  while (stack.length > 0 && hits.length < max && visited < OUTSIDE_WALK_CAP && Date.now() <= deadline) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries.sort((a, b) => b.name.localeCompare(a.name))) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) stack.push(path);
+        continue;
+      }
+      if (!entry.isFile() || !isSourceFile(entry.name) || inProject.has(path)) continue;
+      visited++;
+      const text = index.text(path);
+      if (text === undefined || !text.includes(query.name)) continue;
+      for (const decl of index.declarations(path)) {
+        if (declMatches(decl, query)) hits.push(decl);
+        if (hits.length >= max) break;
+      }
+      if (hits.length >= max) break;
+    }
+  }
+  return hits.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+}
+
+/** Nearest `tsconfig.json` from the directory of `abs` up to `root` (inclusive). */
+export function nearestTsconfig(abs: string, root: string): string | undefined {
+  for (let dir = dirname(abs); ; dir = dirname(dir)) {
+    const candidate = join(dir, "tsconfig.json");
+    if (existsSync(candidate)) return candidate;
+    if (dir === root || dirname(dir) === dir) return undefined;
+  }
+}
+
 export function createSyntacticIndex(root: string, project: ParsedProject): SyntacticIndex {
   const texts = new Map<string, string | undefined>();
   const sources = new Map<string, ts.SourceFile | undefined>();
@@ -229,18 +293,7 @@ export function createSyntacticIndex(root: string, project: ParsedProject): Synt
         const text = index.text(file);
         if (text === undefined) continue;
         if (query.fuzzy ? !text.toLowerCase().includes(needle) : !text.includes(needle)) continue;
-        for (const decl of index.declarations(file)) {
-          if (query.member !== undefined) {
-            if (decl.parentName === undefined) continue;
-            const parent = decl.parentName.split(".").pop()!;
-            const ok = query.fuzzy
-              ? parent.toLowerCase().includes(needle) && decl.name.toLowerCase().includes(query.member.toLowerCase())
-              : parent === query.name && decl.name === query.member;
-            if (ok) result.push(decl);
-          } else if (query.fuzzy ? decl.name.toLowerCase().includes(needle) : decl.name === query.name) {
-            result.push(decl);
-          }
-        }
+        for (const decl of index.declarations(file)) if (declMatches(decl, query)) result.push(decl);
       }
       return result;
     },
@@ -273,6 +326,26 @@ export interface ReferenceEntry extends Location {
   isWrite: boolean;
 }
 
+export interface ViaEntry extends ReferenceEntry {
+  /** The member the Reference names: a base (`FieldParser.parse`) or an implementation of the queried one. */
+  via: string;
+  through: Through;
+}
+
+export interface ReferenceSplit {
+  /** References of the Symbol itself, Declarations excluded. */
+  direct: ReferenceEntry[];
+  declarations: ReferenceEntry[];
+  /** References that reach it only through a member it implements/overrides, or that name an implementation of it. */
+  via: ViaEntry[];
+  /** Declarations of members that implement or override it. */
+  implementations: Array<ReferenceEntry & { name: string }>;
+  /** Positions the LanguageService reported that are not References of it (sibling implementations). */
+  dropped: ReferenceEntry[];
+  /** `Class.member` names it implements or overrides. */
+  bases: string[];
+}
+
 export interface DefinitionInfo extends Location {
   name: string;
   kind: string;
@@ -286,6 +359,9 @@ export interface CallSite extends Location {
   /** Enclosing function/method of the call (`Class.method`), `(top-level)` for module code. */
   caller: string;
   item: ts.CallHierarchyItem;
+  /** Set when the call reaches the Symbol through a base member or names an implementation of it. */
+  via?: string;
+  through?: Through;
 }
 
 export interface SemanticProject {
@@ -294,9 +370,12 @@ export interface SemanticProject {
   program: ts.Program;
   /** Program files that belong to the Project (no lib, no node_modules). */
   projectFiles: string[];
+  /** Direct References plus Declarations (`isDefinition`) of the Symbol at `pos`. */
   findReferences(absFile: string, pos: number): ReferenceEntry[];
+  /** `findReferences` split into direct / via / implementations / dropped (see `src/references.ts`). */
+  referenceSplit(absFile: string, pos: number): ReferenceSplit;
   definitionAt(absFile: string, pos: number): DefinitionInfo | undefined;
-  /** Incoming calls of the function-like Symbol at `pos`; undefined when it is not callable. */
+  /** Incoming calls of the function-like Symbol at `pos`, split like `referenceSplit` (dropped ones removed); undefined when it is not callable. */
   incomingCalls(absFile: string, pos: number): CallSite[] | undefined;
   /** Incoming calls of a call hierarchy item (for depth > 1). */
   incomingCallsOf(item: ts.CallHierarchyItem): CallSite[];
@@ -374,26 +453,161 @@ export function createSemanticProject(index: SyntacticIndex): SemanticProject {
     return sites;
   };
 
+  const checker = program.getTypeChecker();
+
+  /** Deepest node whose span holds `pos`. */
+  const nodeAt = (sf: ts.SourceFile, pos: number): ts.Node => {
+    let node: ts.Node = sf;
+    for (;;) {
+      const child: ts.Node | undefined = ts.forEachChild(node, (c) => (c.getStart(sf) <= pos && pos < c.end ? c : undefined));
+      if (!child) return node;
+      node = child;
+    }
+  };
+
+  type Member = ts.MethodDeclaration | ts.MethodSignature | ts.PropertyDeclaration | ts.PropertySignature | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.PropertyAssignment;
+  const isMemberNode = (node: ts.Node): node is Member =>
+    ts.isMethodDeclaration(node) || ts.isMethodSignature(node) || ts.isPropertyDeclaration(node) || ts.isPropertySignature(node) ||
+    ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node) || ts.isPropertyAssignment(node);
+  const isTypeContainer = (node: ts.Node): node is ts.ClassLikeDeclaration | ts.InterfaceDeclaration =>
+    ts.isClassLike(node) || ts.isInterfaceDeclaration(node);
+
+  const memberAt = (fileName: string, pos: number): Member | undefined => {
+    const sf = program.getSourceFile(fileName);
+    if (!sf) return undefined;
+    const parent = nodeAt(sf, pos).parent;
+    return parent && isMemberNode(parent) && parent.name.getStart(sf) === pos ? parent : undefined;
+  };
+  const memberKey = (member: ts.Declaration & { name: ts.PropertyName }): string =>
+    `${resolve(member.getSourceFile().fileName)}#${member.name.getStart(member.getSourceFile())}`;
+  const memberName = (member: Member): string => {
+    const owner = member.parent;
+    const ownerName = isTypeContainer(owner) && owner.name ? owner.name.text
+      : ts.isObjectLiteralExpression(owner) && ts.isVariableDeclaration(owner.parent) && ts.isIdentifier(owner.parent.name) ? owner.parent.name.text
+        : "(object)";
+    return `${ownerName}.${member.name.getText(member.getSourceFile())}`;
+  };
+
+  /** Keys of every member `member` implements or overrides, through extends/implements (transitively) or an object literal's contextual type. */
+  const basesOf = (member: Member): string[] => {
+    if (ts.isPrivateIdentifier(member.name)) return [];
+    const name = ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name) ? member.name.text : undefined;
+    if (name === undefined) return [];
+    const keys = new Set<string>();
+    const seen = new Set<ts.Node>();
+    const fromType = (type: ts.Type): void => {
+      for (const decl of checker.getPropertyOfType(type, name)?.declarations ?? []) {
+        if (decl !== member && isMemberNode(decl)) keys.add(memberKey(decl));
+      }
+      for (const decl of type.getSymbol()?.declarations ?? []) if (isTypeContainer(decl)) fromHeritage(decl);
+    };
+    const fromHeritage = (container: ts.ClassLikeDeclaration | ts.InterfaceDeclaration): void => {
+      if (seen.has(container)) return;
+      seen.add(container);
+      for (const clause of container.heritageClauses ?? []) for (const t of clause.types) fromType(checker.getTypeAtLocation(t));
+    };
+    const owner = member.parent;
+    if (isTypeContainer(owner)) fromHeritage(owner);
+    else if (ts.isObjectLiteralExpression(owner)) {
+      const contextual = checker.getContextualType(owner);
+      if (contextual) fromType(contextual);
+    }
+    return [...keys];
+  };
+
+  interface RawRef extends RefDescriptor {
+    entry: ReferenceEntry;
+    absFile: string;
+    start: number;
+  }
+
+  const split = (absFile: string, pos: number): { result: ReferenceSplit; raw: Map<string, RawRef>; buckets: Map<string, "direct" | "via" | "dropped"> } => {
+    const groups = service.findReferences(absFile, pos) ?? [];
+    const descriptors: Array<GroupDescriptor<RawRef>> = [];
+    let target = -1;
+    let flagged = -1;
+    for (const group of groups) {
+      const def = group.definition;
+      const member = memberAt(def.fileName, def.textSpan.start);
+      const bases = member ? basesOf(member) : [];
+      const typeMember = member !== undefined && (isTypeContainer(member.parent) || bases.length > 0);
+      const groupKey = member ? memberKey(member) : `${resolve(def.fileName)}#${def.textSpan.start}`;
+      const refs: RawRef[] = [];
+      for (const ref of group.references) {
+        const loc = location(ref.fileName, ref.textSpan.start);
+        const refFile = resolve(ref.fileName);
+        if (refFile === resolve(absFile) && ref.textSpan.start <= pos && pos <= ref.textSpan.start + ref.textSpan.length && target < 0) {
+          target = descriptors.length;
+        }
+        if (ref.isDefinition && flagged < 0) flagged = descriptors.length;
+        if (!loc) continue;
+        const sf = program.getSourceFile(ref.fileName)!;
+        const parent = nodeAt(sf, ref.textSpan.start).parent;
+        refs.push({
+          key: `${loc.file}:${loc.line}:${loc.col}`,
+          isDefinition: ref.isDefinition ?? false,
+          atDefinition: `${refFile}#${ref.textSpan.start}` === groupKey,
+          isSuper: parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.expression.kind === ts.SyntaxKind.SuperKeyword,
+          entry: { ...loc, isDefinition: ref.isDefinition ?? false, isWrite: ref.isWriteAccess },
+          absFile: refFile,
+          start: ref.textSpan.start,
+        });
+      }
+      descriptors.push({ key: groupKey, name: member ? memberName(member) : def.name, member: typeMember, bases, refs });
+    }
+    const index = target >= 0 ? target : Math.max(0, flagged);
+    const c = classifyReferenceGroups(descriptors, index);
+    const raw = new Map<string, RawRef>();
+    const buckets = new Map<string, "direct" | "via" | "dropped">();
+    for (const d of descriptors) for (const r of d.refs) raw.set(r.key, r);
+    for (const r of [...c.direct, ...c.declarations]) buckets.set(r.key, "direct");
+    for (const v of c.via) buckets.set(v.ref.key, "via");
+    for (const r of [...c.dropped, ...c.implementations.map((i) => i.ref)]) buckets.set(r.key, "dropped");
+    return {
+      result: {
+        direct: c.direct.map((r) => r.entry),
+        declarations: c.declarations.map((r) => ({ ...r.entry, isDefinition: true })),
+        via: c.via.map((v) => ({ ...v.ref.entry, via: v.via, through: v.through })),
+        implementations: c.implementations.map((i) => ({ ...i.ref.entry, name: i.name })),
+        dropped: c.dropped.map((r) => r.entry),
+        bases: c.bases,
+      },
+      raw,
+      buckets,
+    };
+  };
+
+  /** Call sites keyed against the reference split: direct and via kept, sibling calls dropped. */
+  const splitSites = (absFile: string, pos: number, calls: readonly ts.CallHierarchyIncomingCall[]): CallSite[] => {
+    const { result, raw, buckets } = split(absFile, pos);
+    const viaOf = new Map<string, ViaEntry>(result.via.map((v) => [`${v.file}:${v.line}:${v.col}`, v]));
+    const sites: CallSite[] = [];
+    for (const call of calls) {
+      for (const span of call.fromSpans) {
+        const loc = location(call.from.file, span.start);
+        if (!loc) continue;
+        const file = resolve(call.from.file);
+        const hits = [...raw.values()].filter((r) => r.absFile === file && span.start <= r.start && r.start <= span.start + span.length);
+        const kinds = hits.map((h) => buckets.get(h.key));
+        if (kinds.length > 0 && !kinds.includes("direct") && !kinds.includes("via")) continue;
+        const viaHit = kinds.includes("direct") ? undefined : hits.find((h) => viaOf.has(h.key));
+        sites.push({ ...loc, caller: callerName(call.from), item: call.from, ...(viaHit ? { via: viaOf.get(viaHit.key)!.via, through: viaOf.get(viaHit.key)!.through } : {}) });
+      }
+    }
+    return sites;
+  };
+
   return {
     index,
     service,
     program,
     projectFiles,
     findReferences(absFile, pos) {
-      const groups = service.findReferences(absFile, pos) ?? [];
-      const seen = new Set<string>();
-      const entries: ReferenceEntry[] = [];
-      for (const group of groups) {
-        for (const ref of group.references) {
-          const loc = location(ref.fileName, ref.textSpan.start);
-          if (!loc) continue;
-          const key = `${loc.file}:${loc.line}:${loc.col}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          entries.push({ ...loc, isDefinition: ref.isDefinition ?? false, isWrite: ref.isWriteAccess });
-        }
-      }
-      return entries;
+      const { result } = split(absFile, pos);
+      return [...result.declarations, ...result.direct];
+    },
+    referenceSplit(absFile, pos) {
+      return split(absFile, pos).result;
     },
     definitionAt(absFile, pos) {
       const defs = service.getDefinitionAtPosition(absFile, pos) ?? [];
@@ -406,7 +620,7 @@ export function createSemanticProject(index: SyntacticIndex): SemanticProject {
       const prepared = service.prepareCallHierarchy(absFile, pos);
       const items = prepared === undefined ? [] : Array.isArray(prepared) ? prepared : [prepared];
       if (items.length === 0) return undefined;
-      return items.flatMap((item) => toCallSites(service.provideCallHierarchyIncomingCalls(item.file, item.selectionSpan.start)));
+      return items.flatMap((item) => splitSites(item.file, item.selectionSpan.start, service.provideCallHierarchyIncomingCalls(item.file, item.selectionSpan.start)));
     },
     incomingCallsOf(item) {
       if (item.kind === ts.ScriptElementKind.scriptElement) return [];

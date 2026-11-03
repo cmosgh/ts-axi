@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join, relative, sep } from "node:path";
 import ts from "typescript";
 import { bool, intFlag, parseArgs, type ParsedArgs, flag } from "../args.js";
 import type { CommandContext } from "../context.js";
@@ -20,7 +20,7 @@ import {
   type DeclChange,
   type FileInput,
 } from "../impact.js";
-import { createSemanticProject, SOURCE_EXTENSIONS, type CallSite, type ReferenceEntry, type SemanticProject } from "../project.js";
+import { createSemanticProject, loadProject, SOURCE_EXTENSIONS, type CallSite, type ReferenceEntry, type SemanticProject, type ViaEntry } from "../project.js";
 import { block, helpBlock, out } from "../render.js";
 import { isTestFile } from "../settings.js";
 import { isFunctionLike, type Declaration, type Kind } from "../symbols.js";
@@ -38,12 +38,14 @@ input:
   (none) = working tree vs HEAD (staged + unstaged + untracked); --staged = index vs HEAD
   <git-range> = any git diff range (main...HEAD, abc123, v1..v2); - = unified diff on stdin (needs the after side checked out)
   analysis is of the current checkout - for a range whose head is not the working tree, check that head out first
-flags[6]:
-  --staged, --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), -P <tsconfig>, --json
+flags[7]:
+  --staged, --via (adds References through an interface or base member to refs[n] with a via column), --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), -P <tsconfig>, --json
 output:
-  base, head, changes (count), changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,files,tests}
+  base, head, changes (count), changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}
   change = signature | removed | type | added | body | modified (before unavailable) - riskiest first
+  refs_* / files / tests count direct References only; via = References outside the change set that reach the Symbol through an interface or base member it implements (or name an override of it) - they MAY call it
   refs[n]{symbol,file,line,context} = References outside the change set; truncated + refs_shown + refs_outside_total when cut
+  notes[n]{symbol,note} = a signature change of a member that implements an interface or base member (the contract may break)
   local_only = Changes with no Reference outside the change set; file_level[n]{file,lines} = changed lines outside any Declaration
   blind_spots[n]{symbol,file,line,reason} = uses the checker cannot follow (any; string keys; unresolved export *)
   skipped[n]{file,reason} = files in the diff that were not analysed (.astro, .json, outside the Project)
@@ -58,6 +60,7 @@ examples[5]:
 
 const SPECS = [
   { name: "--staged", boolean: true },
+  { name: "--via", boolean: true },
   { name: "--depth" },
   { name: "--limit" },
   { name: "--grep", boolean: true },
@@ -171,6 +174,10 @@ interface Row {
   at: string;
   all: ReferenceEntry[];
   outside: ReferenceEntry[];
+  /** Via References outside the change set. */
+  via: ViaEntry[];
+  /** Members the changed one implements or overrides. */
+  bases: string[];
 }
 
 /** Uses of a removed Symbol in the checkout: identifiers the checker can no longer resolve. */
@@ -359,6 +366,34 @@ function rerun(arg: string | undefined, parsed: ParsedArgs, extra: string): stri
   return `${arg === "-" ? "<diff> | " : ""}${parts.join(" ")}`;
 }
 
+/**
+ * Spec files skipped as "not in the Project" (a tsconfig.lib.json / tsconfig.app.json that excludes
+ * them): name the sibling tsconfig that includes them so tests get counted.
+ */
+function specFilesHint(cwd: string, opened: Opened, skipped: Array<{ file: string; reason: string }>, noTests: boolean): string | undefined {
+  const tsconfig = opened.location.path;
+  if (!tsconfig) return undefined;
+  const outside = skipped.filter((s) => s.reason === "not in the Project");
+  const tests = outside.filter((s) => isTestFile(s.file, opened.settings));
+  if (tests.length === 0 || !(tests.length === outside.length || noTests)) return undefined;
+  const dir = dirname(tsconfig);
+  const name = basename(tsconfig);
+  const order = name === "tsconfig.lib.json" || name === "tsconfig.app.json" ? ["tsconfig.json", "tsconfig.spec.json"] : ["tsconfig.spec.json", "tsconfig.json"];
+  const candidates = order.map((n) => join(dir, n)).filter((c) => c !== tsconfig && existsSync(c));
+  // Prefer the one that really includes a skipped spec file (an Nx tsconfig.json may only hold references).
+  const includes = (c: string): boolean => {
+    try {
+      const files = new Set(loadProject(opened.root, { path: c, implicit: false }).fileNames);
+      return tests.some((t) => files.has(opened.index.abs(t.file)));
+    } catch {
+      return false;
+    }
+  };
+  const pick = candidates.find(includes) ?? candidates[0];
+  const rel = (abs: string): string => relative(cwd, abs).split(sep).join("/");
+  return `Spec files are outside ${rel(tsconfig)}; run with -P ${pick ? rel(pick) : "<sibling tsconfig.json that includes them>"} to count tests`;
+}
+
 export async function impactCommand(args: string[], ctx: CommandContext): Promise<string> {
   const parsed = parseArgs(args, SPECS, "ts-axi impact");
   if (parsed.positionals.length > 1) {
@@ -370,6 +405,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   const limit = intFlag(parsed, "--limit", DEFAULT_LIMIT, { min: 1, max: MAX_LIMIT });
   const depth = intFlag(parsed, "--depth", 1, { min: 1, max: 3 });
   const grep = bool(parsed, "--grep");
+  const showVia = bool(parsed, "--via");
   const started = performance.now();
 
   const opened = open(ctx.cwd, parsed);
@@ -427,6 +463,8 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       ? [arg === undefined && !staged ? "Run `ts-axi impact main...HEAD` to analyse a branch against main" : "Run `ts-axi impact` for uncommitted changes"]
       : ["Changes touch imports or module-level statements only - read those lines directly"];
     if (skipped.length > 0) help.push("Skipped files are not TS or JS source of the Project - review them by hand");
+    const specHint = specFilesHint(ctx.cwd, opened, skipped, true);
+    if (specHint) help.push(specHint);
     return out(
       block({
         ...header,
@@ -452,27 +490,36 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       at: `${change.file}:${(live ?? source).nameLine}`,
       all: [],
       outside: [],
+      via: [],
+      bases: [],
     };
   });
   for (const row of rows) {
     if (row.live) changeSet.set(row.change.file, [...(changeSet.get(row.change.file) ?? []), [row.live.line, row.live.endLine]]);
   }
   const known = new Set<string>();
+  const byPosition = (a: ReferenceEntry, b: ReferenceEntry): number => a.file.localeCompare(b.file) || a.line - b.line || a.col - b.col;
   for (const row of rows) {
-    const entries = row.live
-      ? semantic.findReferences(opened.index.abs(row.live.file), row.live.namePos)
-      : row.change.change === "removed"
-        ? brokenReferences(semantic, row.change.before!)
-        : [];
+    let entries: ReferenceEntry[] = [];
+    if (row.live) {
+      const split = semantic.referenceSplit(opened.index.abs(row.live.file), row.live.namePos);
+      entries = [...split.declarations, ...split.direct];
+      // Sibling implementations and via uses are known positions, not textual misses for --grep.
+      for (const e of [...split.via, ...split.implementations, ...split.dropped]) known.add(`${e.file}:${e.line}`);
+      row.via = split.via.filter((e) => !inRanges(changeSet.get(e.file), e.line)).sort(byPosition);
+      row.bases = split.bases;
+    } else if (row.change.change === "removed") {
+      entries = brokenReferences(semantic, row.change.before!);
+    }
     for (const e of entries) known.add(`${e.file}:${e.line}`);
     row.all = entries.filter((e) => !e.isDefinition);
-    row.outside = row.all
-      .filter((e) => !inRanges(changeSet.get(e.file), e.line))
-      .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.col - b.col);
+    row.outside = row.all.filter((e) => !inRanges(changeSet.get(e.file), e.line)).sort(byPosition);
   }
+  const shownRefs = (r: Row): Array<ReferenceEntry & { via?: string }> => (showVia ? [...r.outside, ...r.via].sort(byPosition) : r.outside);
+  const hasOutside = (r: Row): boolean => r.outside.length > 0 || r.via.length > 0;
 
   const listed = rows
-    .filter((r) => r.outside.length > 0)
+    .filter(hasOutside)
     .sort((a, b) =>
       compareChanges(
         { change: a.change.change, exported: a.exported, refsOutside: a.outside.length, file: a.change.file, line: (a.live ?? a.change.before!).line },
@@ -480,22 +527,23 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       ),
     );
   const localOnly = rows
-    .filter((r) => r.outside.length === 0)
+    .filter((r) => !hasOutside(r))
     .sort((a, b) => compareChanges(
       { change: a.change.change, exported: a.exported, refsOutside: 0, file: a.change.file, line: (a.live ?? a.change.before!).line },
       { change: b.change.change, exported: b.exported, refsOutside: 0, file: b.change.file, line: (b.live ?? b.change.before!).line },
     ));
 
-  const quotas = allocateBudget(listed.map((r) => r.outside.length), limit);
+  const quotas = allocateBudget(listed.map((r) => shownRefs(r).length), limit);
   const refRows = listed.flatMap((r, i) =>
-    r.outside.slice(0, quotas[i]).map((e) => ({
+    shownRefs(r).slice(0, quotas[i]).map((e) => ({
       symbol: r.symbol,
       file: e.file,
       line: e.line,
+      ...(showVia ? { via: e.via ?? "-" } : {}),
       context: contextOf(lineOf(opened.index.text(opened.index.abs(e.file)), e.line), e.col),
     })),
   );
-  const outsideTotal = listed.reduce((n, r) => n + r.outside.length, 0);
+  const outsideTotal = listed.reduce((n, r) => n + shownRefs(r).length, 0);
   const truncated = refRows.length < outsideTotal;
 
   const fileCounts = (r: Row): { files: number; tests: number } => {
@@ -532,7 +580,15 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   if (depth === 1 && rows.some((r) => r.live && isFunctionLike(r.kind) && r.outside.length > 0)) {
     help.push(`Run \`${rerun(arg, parsed, "--depth 2")}\` for who calls the callers`);
   }
+  if (!showVia && listed.some((r) => r.via.length > 0)) {
+    help.push(`Run \`${rerun(arg, parsed, "--via")}\` for References through an interface or base member - they may reach the changed code`);
+  }
   if (skipped.length > 0) help.push("Skipped files are not TS or JS source of the Project - review them by hand");
+  const specHint = specFilesHint(ctx.cwd, opened, skipped, listed.every((r) => fileCounts(r).tests === 0));
+  if (specHint) help.push(specHint);
+  const notes = rows
+    .filter((r) => r.change.change === "signature" && r.bases.length > 0)
+    .map((r) => ({ symbol: r.symbol, note: `implements ${r.bases.join(" and ")}` }));
 
   return out(
     block({
@@ -547,12 +603,14 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
               at: r.at,
               refs_total: r.all.length,
               refs_outside: r.outside.length,
+              via: r.via.length,
               ...fileCounts(r),
             })),
             refs: refRows,
           }
         : {}),
       ...(truncated ? { truncated: true, refs_shown: refRows.length, refs_outside_total: outsideTotal } : {}),
+      ...(notes.length > 0 ? { notes } : {}),
       ...(localOnly.length > 0 ? { local_only: localOnlyLine(localOnly.map((r) => `${r.symbol} ${r.change.change}`)) } : {}),
       ...(fileLevel.length > 0 ? { file_level: fileLevel } : {}),
       ...capped("blind_spots", spots),

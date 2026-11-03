@@ -18,6 +18,14 @@ The text of a Declaration without its body: name, parameters, return type, modif
 
 Any place in the analysed code that names a Symbol, including its Declarations. A Reference is **inside** or **outside** a Change set.
 
+## Via reference
+
+A Reference that reaches the Symbol only through an interface or base-class member it implements or overrides: `parser.parse(raw)` with `parser: FieldParser` may run `DateParser.parse`, but names `FieldParser.parse`. Counted apart from the Symbol's own References. The uses of an Implementation, seen from the member it implements, are Via references too.
+
+## Implementation
+
+A class member that implements an interface member or overrides a base-class member. Its Declaration is never a Reference of the member it implements, nor of the other Implementations of that member.
+
 ## Caller
 
 A Reference that invokes a function-like Symbol (call, `new`, tagged template). Every Caller is a Reference; a function passed as a value is a Reference but not a Caller.

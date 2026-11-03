@@ -18,6 +18,7 @@ import {
 } from "../src/git.js";
 import { DEFAULT_TEST_GLOBS, isTestFile, loadSettings, readSettingsFile, writeSettingsFile } from "../src/settings.js";
 import { configCommand } from "../src/commands/config.js";
+import { classifyReferenceGroups, viaLine, type GroupDescriptor, type RefDescriptor } from "../src/references.js";
 import {
   allocateBudget,
   classifyFile,
@@ -547,5 +548,65 @@ describe("impact logic", () => {
       { line: 1, col: 1 },
       { line: 1, col: 24 },
     ]);
+  });
+});
+
+describe("classifyReferenceGroups", () => {
+  const ref = (key: string, extra: Partial<RefDescriptor> = {}): RefDescriptor => ({ key, isDefinition: false, atDefinition: false, isSuper: false, ...extra });
+  const group = (key: string, name: string, refs: RefDescriptor[], o: { member?: boolean; bases?: string[] } = {}): GroupDescriptor<RefDescriptor> => ({
+    key,
+    name,
+    member: o.member ?? true,
+    bases: o.bases ?? [],
+    refs,
+  });
+  const keys = (refs: RefDescriptor[]) => refs.map((r) => r.key);
+
+  // Shape of findReferences on an implementation: the interface group plus every implementation's group.
+  const iface = group("i", "Parser.parse", [ref("i-decl", { atDefinition: true }), ref("registry")]);
+  const date = group("d", "DateParser.parse", [ref("d-decl", { isDefinition: true, atDefinition: true }), ref("direct-call")], { bases: ["i"] });
+  const name = group("n", "NameParser.parse", [ref("n-decl", { atDefinition: true }), ref("name-call")], { bases: ["i"] });
+
+  it("an implementation: own group direct, interface uses via, siblings dropped", () => {
+    const c = classifyReferenceGroups([iface, date, name], 1);
+    expect(keys(c.direct)).toEqual(["direct-call"]);
+    expect(keys(c.declarations)).toEqual(["d-decl"]);
+    expect(c.via.map((v) => [v.ref.key, v.via, v.through])).toEqual([["registry", "Parser.parse", "base"]]);
+    expect(keys(c.dropped).sort()).toEqual(["i-decl", "n-decl", "name-call"]);
+    expect(c.implementations).toEqual([]);
+    expect(c.bases).toEqual(["Parser.parse"]);
+  });
+
+  it("the interface member: implementations counted, their uses via, nothing dropped", () => {
+    const c = classifyReferenceGroups([iface, date, name], 0);
+    expect(keys(c.direct)).toEqual(["registry"]);
+    expect(keys(c.declarations)).toEqual(["i-decl"]);
+    expect(c.implementations.map((i) => [i.ref.key, i.name])).toEqual([["d-decl", "DateParser.parse"], ["n-decl", "NameParser.parse"]]);
+    expect(c.via.map((v) => [v.ref.key, v.through])).toEqual([["direct-call", "implementation"], ["name-call", "implementation"]]);
+    expect(c.dropped).toEqual([]);
+  });
+
+  it("an override drops super calls of the base; non-member groups (aliases) stay direct", () => {
+    const base = group("b", "Base.parse", [ref("b-decl", { atDefinition: true }), ref("super-call", { isSuper: true }), ref("base-call")]);
+    const lower = group("l", "Lower.parse", [ref("l-decl", { isDefinition: true, atDefinition: true })], { bases: ["b"] });
+    const alias = group("a", "parseAlias", [ref("alias-use")], { member: false });
+    const c = classifyReferenceGroups([base, lower, alias], 1);
+    expect(c.via.map((v) => v.ref.key)).toEqual(["base-call"]);
+    expect(keys(c.dropped).sort()).toEqual(["b-decl", "super-call"]);
+    expect(keys(c.direct)).toEqual(["alias-use"]);
+  });
+
+  it("a plain function keeps every group direct and dedupes positions by the best bucket", () => {
+    const fn = group("f", "parse", [ref("f-decl", { isDefinition: true }), ref("use")], { member: false });
+    const alias = group("a", "parseList", [ref("use"), ref("alias-use")], { member: false });
+    const c = classifyReferenceGroups([fn, alias], 0);
+    expect(keys(c.direct)).toEqual(["use", "alias-use"]);
+    expect(keys(c.declarations)).toEqual(["f-decl"]);
+  });
+
+  it("viaLine prints the count with distinct member names", () => {
+    expect(viaLine(7, ["A.parse", "A.parse"])).toBe("7 (A.parse)");
+    expect(viaLine(2, ["A.parse", "B.parse"])).toBe("2 (A.parse; B.parse)");
+    expect(viaLine(0, [])).toBe("0");
   });
 });

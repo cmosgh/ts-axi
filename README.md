@@ -11,9 +11,9 @@ $ ts-axi impact main...HEAD
 base: 923fb4d7ddc8f4e5c4df9029be388f8cb29ce095
 head: HEAD
 changes: 2
-changed[2]{symbol,kind,change,exported,at,refs_total,refs_outside,files,tests}:
-  formatPrice,function,signature,true,"src/lib/format.ts:5",13,12,6,2
-  Cart.total,method,body,true,"src/lib/cart.ts:32",8,8,5,3
+changed[2]{symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}:
+  formatPrice,function,signature,true,"src/lib/format.ts:5",13,12,0,6,2
+  Cart.total,method,body,true,"src/lib/cart.ts:32",8,8,0,5,3
 refs[20]{symbol,file,line,context}:
   formatPrice,src/components/Counter.tsx,2,"import { formatPrice } from '../lib';"
   formatPrice,src/components/Counter.tsx,12,"{cups} cups = {formatPrice(cups * CUP_CENTS)}"
@@ -65,10 +65,10 @@ npx skills add cmosgh/ts-axi --skill ts-axi
 | --- | --- |
 | `ts-axi` | Home view: project root, tsconfig used (or implicit), source file count, test-file glob and match counts, git branch and dirty count, next steps. Under a second, exit 0 everywhere |
 | `def <target>` | Declarations of a symbol by name (`save`, `User.save`, `path:line`): one match prints detail and body, several print a compact list, none prints `did_you_mean` |
-| `refs <target>` | References of one symbol, grouped by file, with test counts. `--limit`, `--kind calls` |
-| `callers <target>` | Incoming calls of a function-like symbol. `--depth 1..3` |
+| `refs <target>` | References of one symbol, grouped by file, with test counts. A class member that implements an interface (or overrides a base) member counts only its direct References; calls through the interface are `via_interface: n (Iface.member)`, sibling implementations are dropped, and an interface member reports `implementations: n`. `--limit`, `--kind calls`, `--via` (via rows with a `via` column), `--implementations` |
+| `callers <target>` | Incoming calls of a function-like symbol, split the same way (`via_interface`, `--via`). `--depth 1..3` |
 | `outline <file>` | Top-level declarations in source order, class members nested. `--exports` |
-| `impact [<git-range> \| -]` | Declarations changed by the working tree (untracked files included; `--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), riskiest first: change class (`signature`, `removed`, `type`, `added`, `body`, `modified`), References outside the change set, test-file counts, `blind_spots`, `local_only`, `file_level` and `skipped` (non-TS files in the diff). `--limit`, `--depth 2..3`, `--grep`. Analyses the current checkout |
+| `impact [<git-range> \| -]` | Declarations changed by the working tree (untracked files included; `--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), riskiest first: change class (`signature`, `removed`, `type`, `added`, `body`, `modified`), References outside the change set (direct only), a `via` count of calls through an interface or base member (`--via` lists them), test-file counts, `notes` (a signature change of a member that implements an interface member), `blind_spots`, `local_only`, `file_level` and `skipped` (non-TS files in the diff). `--limit`, `--depth 2..3`, `--grep`. Analyses the current checkout |
 | `config` | Show effective settings with their source; `config set <key> <value>` and `config unset <key>` write `.ts-axi.json` |
 
 `ts-axi <command> --help` prints a concise, complete flag reference. `-P <tsconfig>` selects a project on any command that may analyse types; `--json` prints the decoded payload.

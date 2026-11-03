@@ -327,6 +327,28 @@ describe("components and hooks", () => {
   });
 });
 
+describe("interface implementations (src/lib/parsers.ts)", () => {
+  it("callers Discount.adjust: the direct call only, the interface call is via_interface", async () => {
+    const data = await toon("callers", "Discount.adjust");
+    expect(data).toMatchObject({ symbol: "Discount.adjust", declared_at: "src/lib/parsers.ts:6", refs_total: 1, via_interface: "1 (PriceRule.adjust)" });
+    expect(rowsOf(data, "refs").map((r) => `${r["file"]}:${r["line"]}:${r["caller"]}`)).toEqual(["src/lib/parsers.ts:21:(top-level)"]);
+  });
+
+  it("refs Discount.adjust --via adds the PriceRule call; Surcharge never appears", async () => {
+    const { stdout } = await sample.run("refs", "Discount.adjust", "--via");
+    const data = decodeToon(stdout);
+    expect(data["refs_total"]).toBe(1);
+    expect(rowsOf(data, "refs").map((r) => `${r["line"]}:${r["via"]}`)).toEqual(["18:PriceRule.adjust", "21:-"]);
+    expect(stdout).not.toContain("parsers.ts,12");
+  });
+
+  it("refs PriceRule.adjust counts the two implementations, not as refs", async () => {
+    const data = await toon("refs", "PriceRule.adjust");
+    expect(data).toMatchObject({ refs_total: 1, implementations: 2, via_implementations: "1 (Discount.adjust)" });
+    expect(locations(rowsOf(data, "refs"))).toEqual(["src/lib/parsers.ts:18"]);
+  });
+});
+
 describe("--json", () => {
   it("decodes to the same payload as the TOON output", async () => {
     const { stdout } = await sample.run("refs", "formatPrice");

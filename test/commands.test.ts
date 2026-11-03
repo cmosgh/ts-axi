@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decode } from "@toon-format/toon";
@@ -85,7 +85,8 @@ describe("def", () => {
   });
 
   it("lists several matches with concrete narrowing hints", async () => {
-    const { stdout, exitCode } = await run("def", "parse");
+    // --kind function: the parsers' `parse` methods share the name.
+    const { stdout, exitCode } = await run("def", "parse", "--kind", "function");
     expect(exitCode).toBe(0);
     const data = toon(stdout);
     expect(data["matches"]).toEqual([
@@ -93,7 +94,7 @@ describe("def", () => {
       { file: "src/services/parse.ts", line: 3, kind: "function", exported: true, signature: "export function parse(raw: string): number[]" },
     ]);
     expect(stdout).toContain("ts-axi def src/format/parse.ts:1");
-    expect(stdout).toContain("ts-axi def parse --in src/format");
+    expect(stdout).toContain("ts-axi def parse --kind function --in src/format");
   });
 
   it("--in narrows an ambiguous name to one Declaration", async () => {
@@ -154,7 +155,7 @@ describe("def", () => {
 
 describe("refs", () => {
   it("refuses an ambiguous name and lists the candidates", async () => {
-    const { stdout, exitCode } = await run("refs", "parse");
+    const { stdout, exitCode } = await run("refs", "parse", "--kind", "function");
     expect(exitCode).toBe(0);
     const data = toon(stdout);
     expect(data["matches"]).toHaveLength(2);
@@ -242,6 +243,70 @@ describe("callers", () => {
   });
 });
 
+describe("interface and base members", () => {
+  it("callers DateParser.parse counts the direct call only; the interface call is via_interface", async () => {
+    const { stdout } = await run("callers", "DateParser.parse");
+    const data = toon(stdout);
+    expect(data).toMatchObject({ symbol: "DateParser.parse", refs_total: 1, files: 1, via_interface: "1 (FieldParser.parse)" });
+    expect(data["refs"]).toEqual([{ file: "src/services/dates.ts", line: 4, caller: "dayOf", context: "return new DateParser().parse(x);" }]);
+    expect(stdout).not.toContain("name-parser.ts");
+    expect(stdout).not.toContain("code-parser.ts");
+    expect(stdout).toContain("ts-axi callers src/parsers/date-parser.ts:4 --via");
+  });
+
+  it("refs DateParser.parse drops sibling implementations and the interface Declaration", async () => {
+    const { stdout } = await run("refs", "DateParser.parse");
+    expect(toon(stdout)).toMatchObject({ refs_total: 1, via_interface: "1 (FieldParser.parse)" });
+    expect(stdout).not.toMatch(/name-parser|code-parser|field-parser/);
+  });
+
+  it("--via adds the registry call with a via column", async () => {
+    const data = toon((await run("callers", "DateParser.parse", "--via")).stdout);
+    expect(data["refs_total"]).toBe(1);
+    expect(data["refs"]).toEqual([
+      { file: "src/parsers/registry.ts", line: 5, caller: "parseField", via: "FieldParser.parse", context: "return parser.parse(raw);" },
+      { file: "src/services/dates.ts", line: 4, caller: "dayOf", via: "-", context: "return new DateParser().parse(x);" },
+    ]);
+  });
+
+  it("refs FieldParser.parse counts implementations, rows only with --implementations", async () => {
+    const data = toon((await run("refs", "FieldParser.parse")).stdout);
+    expect(data).toMatchObject({ refs_total: 1, implementations: 3, via_implementations: "1 (DateParser.parse)" });
+    expect(data["refs"]).toEqual([{ file: "src/parsers/registry.ts", line: 5, context: "return parser.parse(raw);" }]);
+    const listed = toon((await run("refs", "FieldParser.parse", "--implementations")).stdout);
+    expect(listed["implementations"]).toEqual([
+      { file: "src/parsers/code-parser.ts", line: 4, symbol: "CodeParser.parse" },
+      { file: "src/parsers/date-parser.ts", line: 4, symbol: "DateParser.parse" },
+      { file: "src/parsers/name-parser.ts", line: 4, symbol: "NameParser.parse" },
+    ]);
+  });
+
+  it("an override reaches the base call through via; super.parse stays with the base", async () => {
+    const lower = toon((await run("refs", "LowerParser.parse", "--via")).stdout);
+    expect(lower).toMatchObject({ refs_total: 0, via_interface: "1 (BaseParser.parse)" });
+    expect(lower["refs"]).toEqual([{ file: "src/parsers/registry.ts", line: 9, via: "BaseParser.parse", context: "return parser.parse(raw);" }]);
+    const base = toon((await run("refs", "BaseParser.parse")).stdout);
+    expect(base).toMatchObject({ refs_total: 2, implementations: 1 });
+    expect((base["refs"] as Payload[]).map((r) => `${r["file"]}:${r["line"]}`)).toEqual(["src/parsers/base-parser.ts:9", "src/parsers/registry.ts:9"]);
+  });
+
+  it("matches: 0 under -P names the file declared outside that Project and its tsconfig", async () => {
+    const dir = fixtureCopy();
+    mkdirSync(join(dir, "packages", "other"), { recursive: true });
+    writeFileSync(join(dir, "packages", "other", "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [] }, include: ["*.ts"] }));
+    writeFileSync(join(dir, "packages", "other", "tool.ts"), "export const tool = 1;\n");
+    const { stdout } = await runner(dir)("refs", "User.save", "-P", "packages/other/tsconfig.json");
+    const data = toon(stdout);
+    expect(data).toMatchObject({
+      matches: 0,
+      found_outside_project: [{ file: "src/models/user.ts", line: 13 }],
+      hint: "symbol is declared outside the selected project - run with -P tsconfig.json or without -P",
+    });
+    expect(stdout).not.toContain("--fuzzy");
+    expect(stdout).toContain("ts-axi refs User.save -P tsconfig.json");
+  });
+});
+
 describe("cli", () => {
   it("rejects unknown flags with the valid set and a rename hint", async () => {
     const { stdout, exitCode } = await run("refs", "User", "--type", "class");
@@ -317,7 +382,7 @@ describe("impact", () => {
     const data = await impact(r);
     expect(data).toMatchObject({ base: "HEAD", head: "working tree", changes: 1 });
     expect(changed(data)).toEqual([
-      { symbol: "User.save", kind: "method", change: "body", exported: true, at: "src/models/user.ts:13", refs_total: 2, refs_outside: 2, files: 2, tests: 0 },
+      { symbol: "User.save", kind: "method", change: "body", exported: true, at: "src/models/user.ts:13", refs_total: 2, refs_outside: 2, via: 0, files: 2, tests: 0 },
     ]);
     expect(refsOf(data, "User.save")).toEqual(["src/legacy/util.js:5", "src/services/sync.ts:13"]);
     expect(data["elapsed_ms"]).toEqual(expect.any(Number));
@@ -434,7 +499,9 @@ describe("impact", () => {
     const r = repo();
     r.edit("src/services/parse.ts", "map(Number)", "map((n) => Number(n))");
     const data = await impact(r, "--grep");
-    expect(data["unresolved"]).toEqual([{ file: "src/services/parse.ts", line: 1, context: 'import { parse as parseList } from "../format/parse";' }]);
+    // `.parse(` calls of the parser methods are other Symbols' uses: textual matches by design.
+    const unresolved = (data["unresolved"] as Rows).filter((row) => !/^src\/(parsers\/|services\/dates)/.test(String(row["file"])));
+    expect(unresolved).toEqual([{ file: "src/services/parse.ts", line: 1, context: 'import { parse as parseList } from "../format/parse";' }]);
     expect(toon((await r.run("impact")).stdout)).not.toHaveProperty("unresolved");
   });
 
@@ -468,6 +535,45 @@ describe("impact", () => {
     expect(data).toMatchObject({ changes: 1, blind_spots: 0 });
     expect(changed(data)[0]).toMatchObject({ change: "signature" });
     expect(data["help"]).toEqual(expect.any(Array));
+  });
+
+  it("a DateParser.parse body edit counts the direct call; the interface call is via", async () => {
+    const r = repo();
+    r.edit("src/parsers/date-parser.ts", "raw.slice(0, 10)", "raw.slice(0, 8)");
+    const data = await impact(r);
+    expect(changed(data)).toEqual([
+      { symbol: "DateParser.parse", kind: "method", change: "body", exported: true, at: "src/parsers/date-parser.ts:4", refs_total: 1, refs_outside: 1, via: 1, files: 1, tests: 0 },
+    ]);
+    expect(refsOf(data, "DateParser.parse")).toEqual(["src/services/dates.ts:4"]);
+    expect(data).not.toHaveProperty("notes");
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi impact --via")]));
+    const withVia = await impact(r, "--via");
+    expect((withVia["refs"] as Rows).map((x) => `${x["file"]}:${x["line"]}:${x["via"]}`)).toEqual([
+      "src/parsers/registry.ts:5:FieldParser.parse",
+      "src/services/dates.ts:4:-",
+    ]);
+  });
+
+  it("a signature change of an implementing method notes the interface it implements", async () => {
+    const r = repo();
+    r.edit("src/parsers/date-parser.ts", "parse(raw: string): string {", "parse(raw: string, strict = false): string {");
+    const data = await impact(r);
+    expect(changed(data)[0]).toMatchObject({ symbol: "DateParser.parse", change: "signature", refs_outside: 1, via: 1 });
+    expect(data["notes"]).toEqual([{ symbol: "DateParser.parse", note: "implements FieldParser.parse" }]);
+  });
+
+  it("spec files outside tsconfig.lib.json point at the sibling tsconfig.json", async () => {
+    const r = repo();
+    r.write("tsconfig.lib.json", JSON.stringify({ extends: "./tsconfig.json", exclude: ["src/**/*.test.ts"] }));
+    r.git("add", "tsconfig.lib.json");
+    r.git("commit", "-q", "-m", "lib");
+    r.edit("src/services/sync.ts", "return list.filter", "return list.slice().filter");
+    r.edit("src/services/sync.test.ts", "=== 2", "=== 2 && true");
+    const data = await impact(r, "-P", "tsconfig.lib.json");
+    expect(data["skipped"]).toEqual([{ file: "src/services/sync.test.ts", reason: "not in the Project" }]);
+    expect(data["help"]).toEqual(
+      expect.arrayContaining(["Spec files are outside tsconfig.lib.json; run with -P tsconfig.json to count tests"]),
+    );
   });
 
   it("a clean tree is a definitive changes: 0", async () => {
