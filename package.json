@@ -1,0 +1,59 @@
+{
+  "name": "ts-axi",
+  "version": "0.1.0",
+  "description": "AXI-compliant TypeScript symbol CLI for agents - definitions, references, callers, file outlines and change impact (blast radius) with token-efficient TOON output",
+  "type": "module",
+  "keywords": [
+    "typescript",
+    "cli",
+    "agent",
+    "axi",
+    "toon",
+    "code-review",
+    "references",
+    "impact-analysis"
+  ],
+  "bin": {
+    "ts-axi": "dist/bin/ts-axi.js"
+  },
+  "files": [
+    "dist",
+    "skills/ts-axi",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/bin/ts-axi.js', 0o755)\"",
+    "build:skill": "tsx scripts/build-skill.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build && pnpm run build:skill -- --check",
+    "dev": "tsx bin/ts-axi.ts",
+    "prepublishOnly": "pnpm run check"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@toon-format/toon": "^4.1.1",
+    "axi-sdk-js": "^0.1.13",
+    "typescript": "~6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "tsx": "^4.23.13",
+    "vitest": "^5.0.1"
+  },
+  "author": "Cristian Mos",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cmosgh/ts-axi.git"
+  },
+  "homepage": "https://github.com/cmosgh/ts-axi#readme",
+  "bugs": {
+    "url": "https://github.com/cmosgh/ts-axi/issues"
+  },
+  "packageManager": "pnpm@10.28.2"
+}
