@@ -272,13 +272,14 @@ function walkExtra(dir: string, outFiles: string[]): void {
   outFiles.push(...walkFiles(dir, { accept: (name) => GREP_EXTRA.some((ext) => name.endsWith(ext)) }).files);
 }
 
-interface Unresolved {
+export interface Unresolved {
   file: string;
   line: number;
   context: string;
 }
 
-function textualMatches(
+/** Whole-word matches of `names` in Project files and templates that are not `known` References. */
+export function textualMatches(
   opened: Opened,
   semantic: SemanticProject,
   names: string[],

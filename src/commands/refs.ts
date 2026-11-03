@@ -2,6 +2,7 @@ import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { importerClosure } from "../importers.js";
+import { textualMatches } from "./impact.js";
 import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
@@ -15,6 +16,7 @@ import {
   declarationAt,
   filterSuffix,
   lineOf,
+  MATCH_ROWS,
   matchRows,
   narrowHints,
   open,
@@ -44,14 +46,16 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
-flags[11]:
+flags[12]:
   ${SHARED_FLAGS}
   --implementations (lists implementations[n]{file,line,symbol} instead of the count)
+  --grep (adds unresolved[n]{file,line,context} - textual matches of the name that are not References; also searches .astro/.vue/.svelte/.mdx/.html)
   --kind calls = same as \`ts-axi callers\`
 output:
   symbol, kind, declared_at, refs_total, files, tests, refs[n]{file,line,context} (Declarations excluded), elapsed_ms
   ${VIA_DOC}
-  an ambiguous name lists matches[n] + the disambiguated forms; nothing is analysed
+  note = the name is registered by a string ('Name' in .controller('Name', fn)) - its uses are textual; add --grep
+  an ambiguous name lists matches[n] (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms; nothing is analysed
 examples[4]:
   ts-axi refs User.save
   ts-axi refs src/models/user.ts:12
@@ -98,7 +102,7 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
     { name: "--limit" },
     { name: "--test-glob", repeatable: true },
     { name: "--via", boolean: true },
-    ...(invoked === "calls" ? [{ name: "--depth" }] : [{ name: "--implementations", boolean: true }]),
+    ...(invoked === "calls" ? [{ name: "--depth" }] : [{ name: "--implementations", boolean: true }, { name: "--grep", boolean: true }]),
   ];
   const parsed = parseArgs(args, specs, command);
   const [raw] = expectPositionals(parsed, 1, `${command} <name | Class.member | path:line[:col]> [flags]`);
@@ -110,7 +114,11 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const label = targetLabel(target);
   const project = flag(parsed, "-P");
   const name = mode === "calls" ? "callers" : "refs";
-  const show = { via: bool(parsed, "--via"), implementations: invoked === "refs" && bool(parsed, "--implementations") };
+  const show = {
+    via: bool(parsed, "--via"),
+    implementations: invoked === "refs" && bool(parsed, "--implementations"),
+    grep: invoked === "refs" && bool(parsed, "--grep"),
+  };
   const started = performance.now();
   const opened = open(ctx.cwd, parsed, positionStartDir(ctx.cwd, target));
   const warning = opened.warning ? { warning: opened.warning } : {};
@@ -151,8 +159,8 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
     }
     if (groups.length > 1) {
       return out(
-        block({ ...warning, symbol: label, ambiguous: `${groups.length} Symbols - pick one`, matches: matchRows(groups) }),
-        helpBlock(narrowHints(name, groups, f, `${label}${filterSuffix(f, project)}`)),
+        block({ ...warning, symbol: label, ambiguous: `${groups.length} Symbols - pick one`, ...matchRows(groups) }),
+        helpBlock(narrowHints(opened, name, groups, f, `${label}${filterSuffix(f, project)}`, target)),
       );
     }
     const decl = groups[0]!.decls[0]!;
@@ -188,7 +196,7 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const declaredAt = decl ? `${decl.file}:${decl.nameLine}` : def && def.line > 0 ? `${def.file}:${def.line}` : "(outside the Project)";
   const header = { ...warning, ...projectFields(opened), symbol, kind, declared_at: declaredAt };
   const explicit = Boolean(project || opened.settings.project);
-  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile };
+  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}) };
 
   return mode === "calls"
     ? renderCallers(semantic, opened, resolved, header, { ...o, limit, depth })
@@ -206,6 +214,7 @@ interface Common {
   label: string;
   name: string;
   absFile: string;
+  decl?: Declaration;
 }
 
 const OUTSIDE_ROWS = 5;
@@ -269,7 +278,10 @@ function footer(semantic: SemanticProject, started: number, touched: string[]): 
 interface Show {
   via: boolean;
   implementations: boolean;
+  grep: boolean;
 }
+
+const NAMELESS_NOTE = "registered by a string - References to it are textual (templates; DI arrays; route configs)";
 
 interface ViaRow extends Row {
   via?: string;
@@ -318,12 +330,25 @@ function renderRefs(
   if (impls.length > 0 && !o.show.implementations) help.push(`Run \`ts-axi refs ${o.declaredAt} --implementations\` to list the ${impls.length} implementations`);
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
   help.unshift(...outside.help);
+  const word = o.symbol.split(".").pop()!;
+  const unresolved = o.show.grep
+    ? textualMatches(
+        opened,
+        semantic,
+        [word],
+        new Set([...rows, ...via, ...impls].map((r) => `${r.file}:${r.line}`)),
+        new Set(o.decl ? [`${o.decl.file}:${o.decl.line}`, `${o.decl.file}:${o.decl.nameLine}`] : []),
+        new Map(),
+      )
+    : [];
+  if (o.decl?.nameless && !o.show.grep) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
   if (isFunctionLike(o.kind)) help.push(`Run \`ts-axi callers ${o.declaredAt}\` for call sites with their enclosing function`);
   help.push(`Run \`ts-axi def ${o.declaredAt}\` for the declaration body`);
   help.push(...scopeHelp(o.scope));
   return out(
     block({
       ...header,
+      ...(o.decl?.nameless ? { note: NAMELESS_NOTE } : {}),
       refs_total: rows.length,
       files,
       tests,
@@ -342,6 +367,8 @@ function renderRefs(
             })),
           }),
       ...(truncated ? { truncated: true } : {}),
+      ...(o.show.grep ? { unresolved: unresolved.length === 0 ? 0 : unresolved.slice(0, o.limit) } : {}),
+      ...(unresolved.length > o.limit ? { unresolved_total: unresolved.length } : {}),
       ...outside.fields,
       ...scopeFields(o.scope),
       ...footer(semantic, o.started, fileList),
@@ -423,11 +450,12 @@ function renderCallers(
   if (top && o.depth === 1) help.push(`Run \`ts-axi callers ${o.declaredAt} --depth 2\` for who calls the callers`);
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
   help.unshift(...outside.help);
-  help.push(`Run \`ts-axi refs ${o.declaredAt}\` for every Reference (not only calls)`);
+  help.push(`Run \`ts-axi refs ${o.declaredAt}${o.decl?.nameless ? " --grep" : ""}\` for every Reference (not only calls)`);
   help.push(...scopeHelp(o.scope));
   return out(
     block({
       ...header,
+      ...(o.decl?.nameless ? { note: NAMELESS_NOTE } : {}),
       refs_total: rows.length,
       files,
       tests,

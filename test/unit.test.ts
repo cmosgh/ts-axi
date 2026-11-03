@@ -36,6 +36,8 @@ import {
 } from "../src/impact.js";
 import { parseSource } from "../src/project.js";
 import { collectDeclarations } from "../src/symbols.js";
+import { matchRows, MATCH_ROWS, narrowHints } from "../src/commands/common.js";
+import { groupSymbols } from "../src/symbols.js";
 
 let dir: string;
 beforeEach(() => {
@@ -509,7 +511,7 @@ describe("impact logic", () => {
     const two = "export function p(a: string): string;\nexport function p(a: number): number;\nexport function p(a: any) { return a; }\n";
     const sig = (text: string) => {
       const sf = parseSource("src/a.ts", text);
-      return signatures(sf, collectDeclarations(sf, "src/a.ts")).get("p#function");
+      return signatures(collectDeclarations(sf, "src/a.ts")).get("p#function");
     };
     expect(sig(one)).not.toBe(sig(two));
     expect(sig(one)!.split("\n")).toHaveLength(2);
@@ -548,6 +550,124 @@ describe("impact logic", () => {
       { line: 1, col: 1 },
       { line: 1, col: 24 },
     ]);
+  });
+});
+
+describe("Signatures", () => {
+  const sigs = (text: string, file = "src/a.ts") =>
+    Object.fromEntries(collectDeclarations(parseSource(file, text), file).map((d) => [d.qualifiedName, d.fullSignature]));
+
+  it("a plain variable is keyword + name + type annotation; the initializer is the body", () => {
+    expect(sigs("export const states = [\n  'a',\n  'b',\n];\nlet n: number = 1;\nvar s!: string;\n")).toEqual({
+      states: "export const states",
+      n: "let n: number",
+      s: "var s!: string",
+    });
+  });
+
+  it("a function-valued variable is name + parameters + return type", () => {
+    expect(sigs("export const f = async (a: number): Promise<number> => a;\nconst g = function (b) { return b; };\n")).toEqual({
+      f: "export const f = async (a: number): Promise<number> =>",
+      g: "const g = function (b)",
+    });
+  });
+
+  it("class fields and enum members drop their initializer", () => {
+    const s = sigs("export class C {\n  private count: number = 0;\n  static label = 'x';\n  onClick = (e: Event): void => {};\n}\nexport enum E { A = 1, B }\n");
+    expect(s).toMatchObject({ "C.count": "private count: number", "C.label": "static label", "C.onClick": "onClick = (e: Event): void =>", "E.A": "A", "E.B": "B" });
+  });
+});
+
+describe("variable initializer edits", () => {
+  const header = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n";
+  const classify = (before: string, after: string, diff: string) => {
+    const [file] = parseUnifiedDiff(`${header}${diff}`);
+    return classifyFile({ path: "src/a.ts", status: "modified", ...changedRanges(file!), beforeText: before, afterText: after })
+      .changes.map((c) => `${c.key} ${c.change}`);
+  };
+  const BEFORE = "export const childStates = [\n  'a',\n  'b',\n];\n";
+
+  it("an initializer-only edit is body; a type annotation edit is signature", () => {
+    expect(classify(BEFORE, BEFORE.replace("'b'", "'c'"), "@@ -3 +3 @@\n-  'b',\n+  'c',\n")).toEqual(["childStates#variable body"]);
+    const typed = BEFORE.replace("childStates =", "childStates: string[] =");
+    expect(classify(BEFORE, typed, "@@ -1 +1 @@\n-export const childStates = [\n+export const childStates: string[] = [\n")).toEqual(["childStates#variable signature"]);
+  });
+});
+
+describe("nested declarations", () => {
+  const decls = (text: string, file = "src/a.js") =>
+    collectDeclarations(parseSource(file, text), file).map((d) => `${d.kind} ${d.qualifiedName}${d.exported ? " exported" : ""}${d.nameless ? " nameless" : ""}`);
+
+  it("call-registered callbacks take the string name; the DI array form takes its last element", () => {
+    const text = "angular.module('m').controller('MainCtrl', ['$scope', function ($scope) {}]).factory('api', function () { return { get: function () {} }; }).run(function () {});\n";
+    expect(decls(text)).toEqual(["function MainCtrl exported nameless", "function api exported nameless", "method api.get exported", "function run exported nameless"]);
+    const main = collectDeclarations(parseSource("src/a.js", text), "src/a.js")[0]!;
+    expect(main).toMatchObject({ name: "MainCtrl", parentName: "controller", signature: "controller MainCtrl($scope)" });
+    // The DI array is compared but not displayed.
+    expect(main.fullSignature).toBe("controller MainCtrl($scope)\n['$scope']");
+  });
+
+  it("object-literal holders, prototype and static assignments, this-members", () => {
+    const text = [
+      "function Store() { this.load = function () {}; }",
+      "Store.prototype.save = function (x) {};",
+      "Store.create = function () {};",
+      "module.exports = { a() {}, b: function () {}, c: 1 };",
+      "exports.d = () => 1;",
+      "Meteor.methods({ m() {} });",
+      "if (Meteor.isClient) { Template.home.helpers({ h() {} }); }",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual([
+      "function Store",
+      "method Store.load",
+      "method Store.save",
+      "method Store.create",
+      "method exports.a exported",
+      "method exports.b exported",
+      "method exports.d exported",
+      "method methods.m exported",
+      "method Template.home.helpers.h exported",
+    ]);
+  });
+
+  it("IIFE top-level functions are local Declarations; their inner functions are not", () => {
+    const text = "(function () {\n  function helper() { function inner() {} }\n  var fmt = function () {};\n  var n = 1;\n})();\n!function () { function other() {} }();\n";
+    expect(decls(text)).toEqual(["function helper", "function fmt", "function other"]);
+  });
+
+  it("changed lines map to the nested Declaration, not the enclosing IIFE variable", () => {
+    const text = "var api = (function () {\n  function helper() {\n    return 1;\n  }\n  return { helper: helper };\n})();\n";
+    const all = collectDeclarations(parseSource("src/a.js", text), "src/a.js");
+    expect(innermost(all, 3)?.qualifiedName).toBe("helper");
+    expect(innermost(all, 5)?.qualifiedName).toBe("api");
+  });
+});
+
+describe("ambiguity lists", () => {
+  const groups = (files: string[], extra = "") =>
+    groupSymbols(files.flatMap((file) => collectDeclarations(parseSource(file, `export function dup() {}\n${extra}`), file).filter((d) => d.name === "dup")));
+
+  it("caps rows at MATCH_ROWS with matches_total and truncated", () => {
+    const g = groups(Array.from({ length: 25 }, (_, i) => `src/m${String(i).padStart(2, "0")}.ts`));
+    const block = matchRows(g);
+    expect((block["matches"] as unknown[]).length).toBe(MATCH_ROWS);
+    expect(block).toMatchObject({ matches_total: 25, truncated: true });
+    expect(matchRows(g.slice(0, 3))).not.toHaveProperty("truncated");
+  });
+
+  it("offers the top directories below the common prefix by count", () => {
+    const files = [...Array.from({ length: 3 }, (_, i) => `pkg/a/x${i}.ts`), "pkg/b/y.ts", "pkg/c/z.ts"];
+    const ctx = { root: "/repo", cwd: "/repo" } as unknown as Parameters<typeof narrowHints>[0];
+    const hints = narrowHints(ctx, "refs", groups(files), { in: [], exported: false, fuzzy: false }, "dup", { kind: "name", name: "dup" });
+    expect(hints.filter((h) => h.includes("--in"))).toEqual(["Run `ts-axi refs dup --in pkg/a` to keep 3 of 5", "Run `ts-axi refs dup --in pkg/b` to keep 1 of 5"]);
+  });
+
+  it("prints --in hints relative to the current directory", () => {
+    const files = ["pkg/a/x0.ts", "pkg/a/x1.ts", "pkg/b/y.ts"];
+    const ctx = { root: "/repo", cwd: "/repo/pkg/a" } as unknown as Parameters<typeof narrowHints>[0];
+    const hints = narrowHints(ctx, "refs", groups(files), { in: [], exported: false, fuzzy: false }, "dup", { kind: "name", name: "dup" });
+    expect(hints.filter((h) => h.includes("--in"))).toEqual(["Run `ts-axi refs dup --in .` to keep 2 of 3", "Run `ts-axi refs dup --in ../b` to keep 1 of 3"]);
   });
 });
 

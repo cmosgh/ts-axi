@@ -8,11 +8,11 @@ A named thing in the analysed code that has an identity beyond its spelling: two
 
 ## Declaration
 
-The place where a Symbol is introduced, plus its **kind**: `function`, `class`, `method`, `property`, `variable`, `interface`, `type`, `enum`, `enum-member`, `namespace`. A Symbol can have several Declarations (overloads, interface merging). A Declaration is **exported** when another file can import it.
+The place where a Symbol is introduced, plus its **kind**: `function`, `class`, `method`, `property`, `variable`, `interface`, `type`, `enum`, `enum-member`, `namespace`. A Symbol can have several Declarations (overloads, interface merging). A Declaration is **exported** when another file can import it. A **nested declaration** is one of a bounded set of script-style patterns found below the top level: a string-registered callback (`.controller('Name', fn)`, qualified `Name`), a method of an object literal handed to a known holder (`methods.a`, `Template.x.helpers.a`, `exports.a`, `api.a` for `const api = {...}`), a prototype or static assignment (`Foo.bar`), a `this.x = function` in a constructor (`Foo.x`), or a function at the top level of an IIFE (`helper`, not exported); string-registered ones are **nameless** (no identifier, References are textual).
 
 ## Signature
 
-The text of a Declaration without its body: name, parameters, return type, modifiers; for a class member, the member line; for a type, its full text. Compared between versions to classify a Change.
+The text of a Declaration without its body: name, parameters, return type, modifiers; for a class member, the member line; for a type, its full text. For a `variable`, class field or enum member it is the keyword, name and type annotation: the initializer is the body (a function-valued initializer keeps its parameters and return type). Compared between versions to classify a Change.
 
 ## Reference
 

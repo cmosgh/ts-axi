@@ -37,6 +37,10 @@ export interface Declaration {
   nameLine: number;
   /** Has a body / implementation (false for overload signatures). */
   hasBody: boolean;
+  /** Unclipped Signature, compared by `impact`. */
+  fullSignature?: string;
+  /** Registered by a string (`.controller('Name', fn)`): `namePos` is the function, not an identifier of the name. */
+  nameless?: true;
 }
 
 export const SIGNATURE_MAX = 160;
@@ -189,6 +193,15 @@ function openBrace(node: ts.Node, sf: ts.SourceFile): number | undefined {
   return node.getChildren(sf).find((c) => c.kind === ts.SyntaxKind.OpenBraceToken)?.getStart(sf);
 }
 
+/** Text up to the body of a function initializer, or up to the end of the type annotation (the initializer is the body). */
+function headText(node: ts.Node, sf: ts.SourceFile, init: ts.Expression | undefined, typeEnd: number): string {
+  if (isFunctionInitializer(init)) {
+    const text = tokenText(node, sf, node.getStart(sf), init.body.getStart(sf));
+    return ts.isArrowFunction(init) ? text.replace(/\s*=>$/, " =>") : text;
+  }
+  return tokenText(node, sf, node.getStart(sf), typeEnd);
+}
+
 /** Uncapped Signature text; `signatureOf` clips it for display. */
 export function fullSignatureOf(node: ts.Node, sf: ts.SourceFile): string {
   if (ts.isVariableDeclaration(node)) {
@@ -197,12 +210,12 @@ export function fullSignatureOf(node: ts.Node, sf: ts.SourceFile): string {
     const head = ts.isVariableDeclarationList(list) && ts.isVariableStatement(statement)
       ? tokenText(statement, sf, statement.getStart(sf), list.declarations[0]!.getStart(sf))
       : "";
-    const fn = isFunctionInitializer(node.initializer) ? node.initializer : undefined;
-    const end = fn ? fn.body.getStart(sf) : node.end;
-    let text = tokenText(node, sf, node.getStart(sf), end);
-    if (fn && ts.isArrowFunction(fn)) text = text.replace(/\s*=>$/, " =>");
-    return `${head} ${text}`.trim();
+    return `${head} ${headText(node, sf, node.initializer, (node.type ?? node.exclamationToken ?? node.name).end)}`.trim();
   }
+  if (ts.isPropertyDeclaration(node)) {
+    return headText(node, sf, node.initializer, (node.type ?? node.exclamationToken ?? node.questionToken ?? node.name).end).replace(/;$/, "");
+  }
+  if (ts.isEnumMember(node)) return tokenText(node, sf, node.getStart(sf), node.name.end);
   if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
     return tokenText(node, sf, node.getStart(sf), openBrace(node, sf) ?? node.end);
   }
@@ -254,12 +267,91 @@ function nameText(name: ts.Node | undefined, sf: ts.SourceFile): string | undefi
   return name.getText(sf);
 }
 
+/** Registration verbs whose `('Name', fn)` call introduces a nested Declaration (AngularJS style). */
+const REGISTRATION_VERBS: ReadonlySet<string> = new Set(["controller", "service", "factory", "directive", "filter", "component", "run", "config", "provider"]);
+/** Verbs whose callback is a constructor: its `this.x = function` statements are members. */
+const CONSTRUCTOR_VERBS: ReadonlySet<string> = new Set(["controller", "service", "provider"]);
+/** `Template.x.<hook>(fn)` lifecycle callbacks. */
+const TEMPLATE_HOOKS: ReadonlySet<string> = new Set(["onCreated", "onRendered", "onDestroyed"]);
+
+type FunctionNode = ts.FunctionExpression | ts.ArrowFunction;
+
+function unwrap(expr: ts.Expression): ts.Expression {
+  let e = expr;
+  for (;;) {
+    if (ts.isParenthesizedExpression(e)) e = e.expression;
+    else if (ts.isPrefixUnaryExpression(e)) e = e.operand;
+    else if (ts.isVoidExpression(e)) e = e.expression;
+    else return e;
+  }
+}
+
+function asFunction(expr: ts.Expression | undefined): FunctionNode | undefined {
+  if (!expr) return undefined;
+  const e = unwrap(expr);
+  return ts.isFunctionExpression(e) || ts.isArrowFunction(e) ? e : undefined;
+}
+
+/** Statements of an IIFE body: `(function () {...})()`, `!function () {...}()`, `(function () {...}).call(this)`. */
+function iifeBody(expr: ts.Expression | undefined): readonly ts.Statement[] | undefined {
+  if (!expr) return undefined;
+  const call = unwrap(expr);
+  if (!ts.isCallExpression(call)) return undefined;
+  let callee = unwrap(call.expression);
+  if (ts.isPropertyAccessExpression(callee) && (callee.name.text === "call" || callee.name.text === "apply")) callee = unwrap(callee.expression);
+  const fn = asFunction(callee);
+  return fn && ts.isBlock(fn.body) ? fn.body.statements : undefined;
+}
+
+/** The callback of a registration: a function, or the last element of a DI array. */
+function registeredFunction(arg: ts.Expression | undefined): FunctionNode | undefined {
+  if (!arg) return undefined;
+  if (ts.isArrayLiteralExpression(arg)) return asFunction(arg.elements[arg.elements.length - 1]);
+  return asFunction(arg);
+}
+
+function isStringName(node: ts.Node | undefined): node is ts.StringLiteral | ts.NoSubstitutionTemplateLiteral {
+  return node !== undefined && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node));
+}
+
+function compact(node: ts.Node, sf: ts.SourceFile): string {
+  return node.getText(sf).replace(/\s+/g, "");
+}
+
+/** Parameter list (and return type) of a function as `(a, b): T`. */
+function paramsText(fn: FunctionNode, sf: ts.SourceFile): string {
+  const params = fn.parameters.map((p) => tokenText(p, sf, p.getStart(sf), p.end)).join(", ");
+  return `(${params})${fn.type ? `: ${tokenText(fn.type, sf, fn.type.getStart(sf), fn.type.end)}` : ""}`;
+}
+
+/** `node` text up to the body of its function value; `=>` kept for arrows. */
+function headUntil(node: ts.Node, fn: FunctionNode, sf: ts.SourceFile): string {
+  const text = tokenText(node, sf, node.getStart(sf), fn.body.getStart(sf));
+  return ts.isArrowFunction(fn) ? text.replace(/\s*=>$/, " =>") : text;
+}
+
+interface Raw {
+  start: number;
+  end: number;
+  kind: Kind;
+  name: string;
+  qualifiedName: string;
+  parentName?: string;
+  exported: boolean;
+  signature: string;
+  namePos: number;
+  hasBody: boolean;
+  nameless?: true;
+}
+
 /**
- * Top-level Declarations of a file in source order, with class, interface and
- * enum members and namespace members following their parent.
+ * Declarations of a file in source order: top-level ones with class, interface
+ * and enum members and namespace members following their parent, plus nested
+ * declarations of script-style code (registrations, IIFE helpers, prototype and
+ * object-literal methods; see GLOSSARY.md Declaration).
  */
 export function collectDeclarations(sf: ts.SourceFile, file: string): Declaration[] {
-  const result: Declaration[] = [];
+  const raws: Raw[] = [];
   const local = localExportNames(sf);
 
   const add = (
@@ -275,26 +367,197 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       ? node.parent.parent
       : node;
     const start = startNode.getStart(sf);
-    const startLc = sf.getLineAndCharacterOfPosition(start);
-    const namePos = nameNode ? nameNode.getStart(sf) : start;
     const body = bodyOf(ts.isVariableDeclaration(node) && isFunctionInitializer(node.initializer) ? node.initializer : node);
-    result.push({
-      file,
-      line: startLc.line + 1,
-      col: startLc.character + 1,
-      endLine: sf.getLineAndCharacterOfPosition(node.end).line + 1,
+    raws.push({
+      start,
+      end: node.end,
       kind,
       name,
       qualifiedName: parent ? `${parent}.${name}` : name,
       exported,
-      signature: signatureOf(node, sf),
+      signature: fullSignatureOf(node, sf),
       ...(parent ? { parentName: parent } : {}),
-      namePos,
-      nameLine: sf.getLineAndCharacterOfPosition(namePos).line + 1,
+      namePos: nameNode ? nameNode.getStart(sf) : start,
       hasBody:
         body !== undefined ||
         !(ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node)),
     });
+  };
+
+  const nested = (raw: Omit<Raw, "qualifiedName" | "hasBody"> & { qualifiedName?: string }): void => {
+    raws.push({ ...raw, qualifiedName: raw.qualifiedName ?? (raw.parentName ? `${raw.parentName}.${raw.name}` : raw.name), hasBody: true });
+  };
+
+  /** Method and function-valued properties of an object literal as `<holder>.<name>`. */
+  const objectMembers = (obj: ts.ObjectLiteralExpression, holder: string, exported: boolean): void => {
+    for (const prop of obj.properties) {
+      const name = nameText(prop.name, sf);
+      if (!name || !prop.name) continue;
+      if (ts.isMethodDeclaration(prop)) {
+        nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported, signature: fullSignatureOf(prop, sf), namePos: prop.name.getStart(sf) });
+      } else if (ts.isPropertyAssignment(prop)) {
+        const fn = asFunction(prop.initializer);
+        if (fn) nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported, signature: headUntil(prop, fn, sf), namePos: prop.name.getStart(sf) });
+      }
+    }
+  };
+
+  /** `this.x = function` statements at the top level of a constructor-like body. */
+  const thisMembers = (body: ts.ConciseBody | undefined, owner: string, exported: boolean): void => {
+    if (!body || !ts.isBlock(body)) return;
+    for (const statement of body.statements) {
+      if (!ts.isExpressionStatement(statement) || !ts.isBinaryExpression(statement.expression)) continue;
+      const { left, operatorToken, right } = statement.expression;
+      const fn = asFunction(right);
+      if (operatorToken.kind !== ts.SyntaxKind.EqualsToken || !fn || !ts.isPropertyAccessExpression(left) || left.expression.kind !== ts.SyntaxKind.ThisKeyword) continue;
+      nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: owner, exported, signature: headUntil(statement.expression, fn, sf), namePos: left.name.getStart(sf) });
+    }
+  };
+
+  /** Top-level object literals returned by a factory: its API. */
+  const returnedMembers = (body: ts.ConciseBody, owner: string): void => {
+    if (ts.isObjectLiteralExpression(unwrap(body as ts.Expression))) return objectMembers(unwrap(body as ts.Expression) as ts.ObjectLiteralExpression, owner, true);
+    if (!ts.isBlock(body)) return;
+    for (const statement of body.statements) {
+      if (ts.isReturnStatement(statement) && statement.expression && ts.isObjectLiteralExpression(unwrap(statement.expression))) {
+        objectMembers(unwrap(statement.expression) as ts.ObjectLiteralExpression, owner, true);
+      }
+    }
+  };
+
+  const topLevelExported = (name: string): boolean => raws.find((r) => r.qualifiedName === name && r.parentName === undefined)?.exported ?? false;
+  const isConstructorName = (name: string): boolean => /^[A-Z]/.test(name);
+
+  /** `.controller('Name', fn)` and friends; `.run(fn)` / `.config(fn)` take the verb as name. */
+  const registration = (call: ts.CallExpression, verb: string): void => {
+    const [first, second] = call.arguments;
+    const named = isStringName(first);
+    if (!named && verb !== "run" && verb !== "config") return;
+    const name = named ? first.text : verb;
+    const arg = named ? second : first;
+    const callee = call.expression as ts.PropertyAccessExpression;
+    const start = named ? first.getStart(sf) : callee.name.getStart(sf);
+    if (verb === "component" && arg && ts.isObjectLiteralExpression(arg)) {
+      nested({ start, end: arg.end, kind: "variable", name, exported: true, signature: `component ${name}`, namePos: arg.getStart(sf), nameless: true });
+      objectMembers(arg, name, true);
+      return;
+    }
+    const fn = registeredFunction(arg);
+    if (!fn) return;
+    const inject = arg && ts.isArrayLiteralExpression(arg) ? ` [${arg.elements.slice(0, -1).map((e) => e.getText(sf)).join(", ")}]` : "";
+    nested({
+      start,
+      end: arg!.end,
+      kind: "function",
+      name,
+      qualifiedName: name,
+      parentName: verb,
+      exported: true,
+      signature: `${verb} ${name}${paramsText(fn, sf)}`,
+      namePos: (ts.isFunctionExpression(fn) && fn.name ? fn.name : fn).getStart(sf),
+      nameless: true,
+    });
+    // The DI array is compared, not displayed: reordering injections is a contract change.
+    if (inject) raws[raws.length - 1]!.signature += `\n${inject.trim()}`;
+    if (CONSTRUCTOR_VERBS.has(verb)) thisMembers(fn.body, name, true);
+    if (verb === "factory" || verb === "service") returnedMembers(fn.body, name);
+  };
+
+  /** Registrations along a call chain (`angular.module('x').controller(...).service(...)`), in source order. */
+  const callChain = (expr: ts.Expression): void => {
+    const calls: Array<{ call: ts.CallExpression; name: string }> = [];
+    let e = unwrap(expr);
+    while (ts.isCallExpression(e)) {
+      const callee = e.expression;
+      if (ts.isPropertyAccessExpression(callee)) {
+        calls.push({ call: e, name: callee.name.text });
+        e = callee.expression;
+      } else {
+        break;
+      }
+    }
+    for (const { call, name } of calls.reverse()) {
+      const callee = call.expression as ts.PropertyAccessExpression;
+      const receiver = compact(callee.expression, sf);
+      const first = call.arguments[0];
+      if (receiver === "Meteor" && name === "methods" && first && ts.isObjectLiteralExpression(first)) {
+        objectMembers(first, "methods", true);
+      } else if (receiver.startsWith("Template") && (name === "helpers" || name === "events") && first && ts.isObjectLiteralExpression(first)) {
+        objectMembers(first, `${receiver}.${name}`, true);
+      } else if (receiver.startsWith("Template") && TEMPLATE_HOOKS.has(name) && asFunction(first)) {
+        nested({ start: call.getStart(sf), end: call.end, kind: "method", name, parentName: receiver, exported: true, signature: `${receiver}.${headUntil(first!, asFunction(first)!, sf)}`, namePos: callee.name.getStart(sf) });
+      } else if (REGISTRATION_VERBS.has(name)) {
+        registration(call, name);
+      }
+    }
+  };
+
+  /** `exports.x = fn`, `module.exports = {...}`, `Foo.prototype.bar = fn`, `Foo.bar = fn`. */
+  const assignment = (statement: ts.ExpressionStatement, expr: ts.BinaryExpression): void => {
+    const left = expr.left;
+    const right = unwrap(expr.right);
+    if (!ts.isPropertyAccessExpression(left)) return;
+    const target = compact(left, sf);
+    if (target === "module.exports") {
+      if (ts.isObjectLiteralExpression(right)) objectMembers(right, "exports", true);
+      return;
+    }
+    const owner = left.expression;
+    if (ts.isPropertyAccessExpression(owner) && owner.name.text === "prototype" && ts.isIdentifier(owner.expression)) {
+      const cls = owner.expression.text;
+      const fn = asFunction(right);
+      if (fn) nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: cls, exported: topLevelExported(cls), signature: headUntil(expr, fn, sf), namePos: left.name.getStart(sf) });
+      return;
+    }
+    if (ts.isIdentifier(left.name) && left.name.text === "prototype" && ts.isIdentifier(owner) && ts.isObjectLiteralExpression(right)) {
+      objectMembers(right, owner.text, topLevelExported(owner.text));
+      return;
+    }
+    const fn = asFunction(right);
+    if (!fn) return;
+    const holder = target === `module.exports.${left.name.text}` ? "exports" : ts.isIdentifier(owner) ? owner.text : undefined;
+    if (holder === undefined) return;
+    const exported = holder === "exports" || topLevelExported(holder);
+    nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: holder, exported, signature: headUntil(expr, fn, sf), namePos: left.name.getStart(sf) });
+  };
+
+  /** Script-style patterns of one module-level statement; `inIife` adds the IIFE's own functions. */
+  const scriptStatement = (statement: ts.Statement, inIife: boolean): void => {
+    if (ts.isFunctionDeclaration(statement)) {
+      if (!statement.name || !statement.body) return;
+      if (inIife) add(statement, statement.name, statement.name.text, false);
+      if (isConstructorName(statement.name.text)) thisMembers(statement.body, statement.name.text, inIife ? false : topLevelExported(statement.name.text));
+    } else if (ts.isVariableStatement(statement)) {
+      for (const decl of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+        const name = decl.name.text;
+        const fn = asFunction(decl.initializer);
+        if (inIife && fn) add(decl, decl.name, name, false);
+        const exported = inIife ? false : topLevelExported(name);
+        const init = unwrap(decl.initializer);
+        if (ts.isObjectLiteralExpression(init)) objectMembers(init, name, exported);
+        else if (fn && isConstructorName(name)) thisMembers(fn.body, name, exported);
+        else {
+          const body = iifeBody(decl.initializer);
+          if (body) scriptStatements(body, true);
+          else callChain(decl.initializer);
+        }
+      }
+    } else if (ts.isExpressionStatement(statement)) {
+      const expr = unwrap(statement.expression);
+      const body = iifeBody(expr);
+      if (body) scriptStatements(body, true);
+      else if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.EqualsToken) assignment(statement, expr);
+      else callChain(expr);
+    } else if (ts.isIfStatement(statement)) {
+      scriptStatement(statement.thenStatement, inIife);
+      if (statement.elseStatement) scriptStatement(statement.elseStatement, inIife);
+    } else if (ts.isBlock(statement)) {
+      scriptStatements(statement.statements, inIife);
+    }
+  };
+  const scriptStatements = (statements: readonly ts.Statement[], inIife: boolean): void => {
+    for (const statement of statements) scriptStatement(statement, inIife);
   };
 
   const visitStatements = (statements: readonly ts.Statement[], parent: string | undefined, parentExported: boolean): void => {
@@ -305,6 +568,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
           const exported = parent ? parentExported && hasModifier(statement, ts.SyntaxKind.ExportKeyword) : isTopLevelExported(statement, decl.name.text, local);
           add(decl, decl.name, decl.name.text, exported, parent);
         }
+        if (!parent) scriptStatement(statement, false);
         continue;
       }
       if (
@@ -345,13 +609,39 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
           }
         } else if (ts.isModuleDeclaration(statement) && statement.body && ts.isModuleBlock(statement.body)) {
           visitStatements(statement.body.statements, qualified, exported);
+        } else if (ts.isFunctionDeclaration(statement) && !parent) {
+          scriptStatement(statement, false);
         }
+        continue;
       }
+      if (!parent) scriptStatement(statement, false);
     }
   };
 
   visitStatements(sf.statements, undefined, true);
-  return result;
+  // Nested declarations are found after their holder statement; source order is start order.
+  const ordered = raws.map((r, i) => ({ r, i })).sort((a, b) => a.r.start - b.r.start || a.i - b.i);
+  return ordered.map(({ r }) => {
+    const startLc = sf.getLineAndCharacterOfPosition(r.start);
+    const full = r.signature;
+    return {
+      file,
+      line: startLc.line + 1,
+      col: startLc.character + 1,
+      endLine: sf.getLineAndCharacterOfPosition(r.end).line + 1,
+      kind: r.kind,
+      name: r.name,
+      qualifiedName: r.qualifiedName,
+      exported: r.exported,
+      signature: clip(full.split("\n")[0]!),
+      ...(r.parentName !== undefined ? { parentName: r.parentName } : {}),
+      namePos: r.namePos,
+      nameLine: sf.getLineAndCharacterOfPosition(r.namePos).line + 1,
+      hasBody: r.hasBody,
+      fullSignature: full,
+      ...(r.nameless ? { nameless: true as const } : {}),
+    };
+  });
 }
 
 /** Declarations sharing file and qualified name (overloads, merging) are one Symbol. */

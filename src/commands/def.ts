@@ -7,6 +7,7 @@ import {
   BODY_LINES,
   declarationAt,
   filterSuffix,
+  MATCH_ROWS,
   matchRows,
   narrowHints,
   numberedLines,
@@ -26,7 +27,7 @@ flags[7]:
   --kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace>, --in <dir|glob> (repeatable; restrict to files), --exported, --fuzzy (substring, case-insensitive), --full (whole body; default first ${BODY_LINES} lines), -P <tsconfig>, --json
 output:
   1 match = file, line, kind, exported, signature + body fenced with file line numbers
-  several = matches[n]{file,line,kind,exported,signature} + how to narrow
+  several = matches[n]{file,line,kind,exported,signature} (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms (--in, --kind, Class.member, --exported) with how many each keeps
   none = matches: 0 + did_you_mean
 examples[5]:
   ts-axi def User
@@ -122,8 +123,8 @@ export async function defCommand(args: string[], ctx: CommandContext): Promise<s
     block({
       ...(opened.warning ? { warning: opened.warning } : {}),
       symbol: label,
-      matches: matchRows(groups),
+      ...matchRows(groups),
     }),
-    helpBlock(narrowHints("def", groups, f, `${label}${filterSuffix(f, project)}`)),
+    helpBlock(narrowHints(opened, "def", groups, f, `${label}${filterSuffix(f, project)}`, target)),
   );
 }

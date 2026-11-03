@@ -7,6 +7,8 @@ import { main } from "../src/cli.js";
 
 /** The synthetic project, read-only. Run commands in a `fixtureCopy()` instead. */
 export const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "project");
+/** Script-style JavaScript without a tsconfig (AngularJS, Meteor, IIFE, prototype, CommonJS), read-only. */
+export const LEGACY_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "legacy-js");
 /** The synthetic Nx + pnpm workspace, read-only. */
 export const WORKSPACE_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "workspace");
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { decode } from "@toon-format/toon";
 import { beforeAll, describe, expect, it } from "vitest";
 import { main } from "../src/cli.js";
-import { FIXTURE, fixtureCopy, runner, WORKSPACE_FIXTURE, type RunResult } from "./helpers.js";
+import { FIXTURE, fixtureCopy, LEGACY_FIXTURE, runner, WORKSPACE_FIXTURE, type RunResult } from "./helpers.js";
 
 type Payload = Record<string, unknown>;
 
@@ -351,8 +351,8 @@ describe("impact", () => {
     execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" });
 
   /** A fixture copy on branch main with one commit, plus file editing helpers. */
-  function repo() {
-    const dir = fixtureCopy();
+  function repo(fixture?: string) {
+    const dir = fixtureCopy(fixture ? { fixture } : {});
     git(dir, "symbolic-ref", "HEAD", "refs/heads/main");
     git(dir, "add", "-A");
     git(dir, "commit", "-q", "-m", "base");
@@ -596,6 +596,114 @@ describe("impact", () => {
 
   it("rejects --staged with a range", async () => {
     expect((await repo().run("impact", "HEAD", "--staged")).exitCode).toBe(2);
+  });
+
+  it("an edit inside an array initializer is a body change; a new type annotation is a signature change", async () => {
+    const r = repo();
+    r.write("src/states.ts", "export const childStates = [\n  'idle',\n  'busy',\n];\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "states");
+    r.edit("src/states.ts", "'busy',", "'busy',\n  'done',");
+    const data = await impact(r);
+    expect(data["local_only"]).toBe("1 (childStates body)");
+    r.edit("src/states.ts", "childStates = [", "childStates: string[] = [");
+    expect((await impact(r))["local_only"]).toBe("1 (childStates signature)");
+  });
+
+  describe("legacy JavaScript (no tsconfig)", () => {
+    it("names the controller and the IIFE helper an edit touches", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/app.js", "$scope.items = [];", "$scope.items = [{ price: 0 }];");
+      r.edit("lib/format.js", 'text = "0" + text;', 'text = " " + text;');
+      const data = await impact(r);
+      expect(data["warning"]).toContain("implicit project");
+      expect(data).not.toHaveProperty("file_level");
+      expect(data["local_only"]).toBe("1 (CartCtrl body)");
+      expect(changed(data)).toEqual([expect.objectContaining({ symbol: "pad", kind: "function", change: "body", exported: false, at: "lib/format.js:2", refs_outside: 2 })]);
+    });
+
+    it("a DI array or parameter change of a registration is a signature change", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/app.js", '["$scope", "priceService", function ($scope, priceService)', '["$scope", "taxService", function ($scope, priceService)');
+      expect((await impact(r))["local_only"]).toBe("1 (CartCtrl signature)");
+    });
+  });
+});
+
+describe("legacy JavaScript outline / def / refs", () => {
+  let legacy: (...argv: string[]) => Promise<RunResult>;
+  beforeAll(() => {
+    legacy = runner(fixtureCopy({ fixture: LEGACY_FIXTURE }));
+  });
+  const names = async (file: string) =>
+    ((toon((await legacy("outline", file)).stdout)["decls"] as Payload[]) ?? []).map((d) => `${d["line"]} ${d["kind"]} ${d["name"]}`);
+
+  it("outline lists nested declarations with qualified names", async () => {
+    expect(await names("client/app.js")).toEqual(["6 function CartCtrl", "12 function priceService", "13 method priceService.sum", "17 function cartBadge"]);
+    expect(await names("client/methods.js")).toEqual([
+      "2 method methods.addItem",
+      "5 method methods.clearCart",
+      "11 method Template.cartView.helpers.itemCount",
+      "17 method Template.cartView.events.click .clear",
+    ]);
+    expect(await names("lib/ledger.js")).toEqual(["1 function Ledger", "4 method Ledger.reset", "9 method Ledger.add", "14 method Ledger.fromJSON"]);
+    expect(await names("lib/format.js")).toEqual(["2 function pad", "8 function stamp"]);
+    expect(await names("lib/totals.js")).toEqual(["1 variable TAX", "4 method exports.gross", "7 method exports.net", "12 method exports.round"]);
+    const app = toon((await legacy("outline", "client/app.js")).stdout)["decls"] as Payload[];
+    expect(app[0]).toMatchObject({ exported: true, signature: "controller CartCtrl($scope, priceService)" });
+  });
+
+  it("def finds a controller by its registered name", async () => {
+    const { stdout, exitCode } = await legacy("def", "CartCtrl");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("file: client/app.js\nline: 6\nkind: function\nexported: true");
+    expect(fence(stdout)).toContain('.controller("CartCtrl"');
+    expect(stdout).toContain("ts-axi refs client/app.js:6");
+  });
+
+  it("refs on a string-registered name explains it is textual and --grep finds the uses", async () => {
+    const plain = toon((await legacy("refs", "client/app.js:6")).stdout);
+    expect(plain).toMatchObject({ symbol: "CartCtrl", declared_at: "client/app.js:6", refs_total: 0 });
+    expect(plain["note"]).toContain("registered by a string");
+    expect(plain["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi refs client/app.js:6 --grep")]));
+    const grep = toon((await legacy("refs", "clearCart", "--grep")).stdout);
+    expect(grep["unresolved"]).toEqual([{ file: "client/methods.js", line: 18, context: 'Meteor.call("clearCart", this._id);' }]);
+  });
+
+  it("refs on an IIFE helper goes through the LanguageService", async () => {
+    const data = toon((await legacy("refs", "pad")).stdout);
+    expect(data).toMatchObject({ declared_at: "lib/format.js:2", refs_total: 2, files: 1 });
+  });
+});
+
+describe("ambiguous names", () => {
+  let many: (...argv: string[]) => Promise<RunResult>;
+  beforeAll(() => {
+    const dir = fixtureCopy();
+    for (let i = 0; i < 25; i++) {
+      const sub = i < 15 ? "src/gen/alpha" : i < 22 ? "src/gen/beta" : "src/gen/gamma";
+      mkdirSync(join(dir, sub), { recursive: true });
+      const body = i % 5 === 0 ? `export class Repo${i} {\n  findOneByAlias(alias: string): string {\n    return alias;\n  }\n}\n` : `${i % 2 ? "export " : ""}function findOneByAlias(alias: string): string {\n  return alias;\n}\n`;
+      writeFileSync(join(dir, sub, `m${String(i).padStart(2, "0")}.ts`), body);
+    }
+    many = runner(dir);
+  });
+
+  it.each(["def", "refs", "callers"])("%s caps the list at 20 and offers narrowing forms computed from the matches", async (command) => {
+    const data = toon((await many(command, "findOneByAlias")).stdout);
+    expect((data["matches"] as Payload[]).length).toBe(20);
+    expect(data).toMatchObject({ matches_total: 25, truncated: true });
+    const help = data["help"] as string[];
+    expect(help).toEqual(
+      expect.arrayContaining([
+        `Run \`ts-axi ${command} findOneByAlias --in src/gen/alpha\` to keep 15 of 25`,
+        `Run \`ts-axi ${command} findOneByAlias --in src/gen/beta\` to keep 7 of 25`,
+        `Run \`ts-axi ${command} findOneByAlias --kind function\` to keep 20 of 25`,
+        `Run \`ts-axi ${command} findOneByAlias --kind method\` to keep 5 of 25`,
+        `Run \`ts-axi ${command} Repo0.findOneByAlias\` to keep 1 of 25`,
+        `Run \`ts-axi ${command} findOneByAlias --exported\` to keep 15 of 25`,
+      ]),
+    );
   });
 });
 

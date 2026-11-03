@@ -50,6 +50,7 @@ Global flags: `--json` (decoded TOON payload, like mysql-axi), `--help`/`-h` per
 - Name: `save`, `User.save` (member of class/interface/enum/namespace), `--kind function|class|method|property|variable|interface|type|enum|namespace`, `--in <glob>` (restrict to files), `--exported`, `--fuzzy` (substring, case-insensitive).
 - Position: `path:line[:col]` - the identifier at that position (col omitted → the first identifier declared or referenced on that line; several → list them, like an ambiguous name).
 - `refs` / `callers` need exactly one Symbol: an ambiguous name prints the candidate Declarations (`matches[n]`) + `help` showing the disambiguated forms (`ts-axi refs src/a.ts:42` or `--in src/models`), exit 0, no analysis run.
+- Ambiguity lists (`def`, `refs`, `callers`) show at most 20 rows, shallowest path first, then `matches_total` and `truncated: true`. The help is computed from all matches, each line saying how many it keeps: the two largest subtrees below their common directory (`--in`), each kind present (`--kind`), `Parent.member` when the matches have distinct parents, `--exported` when it cuts the list.
 
 ### `impact`
 
@@ -62,9 +63,13 @@ Input, all normalised to `{ file → changed line ranges (after), file → chang
 
 Before-version: `git show <base>:<path>` read in memory for touched files only; parsed syntactically to find the before-Declarations and Signatures. With stdin input and no repo, the before Signature is rebuilt from the `-` lines of the hunk when the whole declaration header is present; otherwise the change class is `modified`.
 
-Per touched file: changed line ranges map to the innermost enclosing Declaration (top-level or class member). Lines outside any Declaration (imports, side-effect statements) are reported as `file-level` changes of that file, one row per file, no references.
+Per touched file: changed line ranges map to the innermost enclosing Declaration (top-level, class member or nested declaration). Lines outside any Declaration (imports, side-effect statements) are reported as `file-level` changes of that file, one row per file, no references.
 
-Change classes (GLOSSARY): `added | removed | signature | body | type | modified`. Signature = declaration text without body, whitespace-normalised, comments stripped.
+Change classes (GLOSSARY): `added | removed | signature | body | type | modified`. Signature = declaration text without body, whitespace-normalised, comments stripped; a variable, class field or enum member's initializer is its body (`const x: T` is the Signature), a registration's DI array is part of its Signature.
+
+### Legacy JavaScript
+
+Script-style code (AngularJS, Meteor, CommonJS, IIFE modules) keeps its functions below the top level, where no Declaration used to exist and `impact` could only say `file_level`. `collectDeclarations` adds **nested declarations** (GLOSSARY) in the same single syntactic pass, in JS and TS files alike, walking only module-level statements, `if` blocks and IIFE bodies (never ordinary function bodies): `<recv>.controller|service|factory|directive|filter|component|run|config|provider('Name', fn | [...deps, fn])` → `function Name` (parent = the verb, signature `controller Name(params)`; `this.x = function` in controller/service/provider bodies and the object a factory returns become `Name.x`), object-literal methods of `Meteor.methods`, `Template.x.helpers|events`, `module.exports`, `const x = {...}`, `Foo.prototype.bar =` / `Foo.bar =` / `exports.x =` functions, and IIFE top-level functions. String-registered names have no identifier: `namePos` is the function, `nameless: true`, a `path:line` target on that line resolves to it, and `refs` says their uses are textual and offers `--grep` (whole-word matches in Project files and templates).
 
 Output order: `signature` and `removed` that are exported first, then `type`, then `added`, then `body`, then `modified`, then `file-level`. Within a class, exported = the class is exported and the member is not `private`/`#private`.
 

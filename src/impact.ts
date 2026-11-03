@@ -3,7 +3,7 @@
 import ts from "typescript";
 import type { Hunk, Range } from "./diff.js";
 import { parseSource } from "./project.js";
-import { collectDeclarations, fullSignatureOf, kindOf, type Declaration, type Kind } from "./symbols.js";
+import { collectDeclarations, type Declaration, type Kind } from "./symbols.js";
 
 export type ChangeClass = "added" | "removed" | "signature" | "body" | "type" | "modified";
 
@@ -97,30 +97,11 @@ export function formatRanges(ranges: readonly Range[]): string {
   return ranges.map(([a, b]) => (a === b ? String(a) : `${a}-${b}`)).join(" ");
 }
 
-function nameStart(node: ts.Node, sf: ts.SourceFile): number {
-  if (ts.isConstructorDeclaration(node)) {
-    return node.getChildren(sf).find((c) => c.kind === ts.SyntaxKind.ConstructorKeyword)?.getStart(sf) ?? node.getStart(sf);
-  }
-  const name = (node as { name?: ts.Node }).name;
-  return name ? name.getStart(sf) : node.getStart(sf);
-}
-
 /** Full Signature per match key; overloads are joined so adding one is a `signature` change. */
-export function signatures(sf: ts.SourceFile, decls: readonly Declaration[]): Map<string, string> {
-  const nodes = new Map<number, ts.Node>();
-  const visit = (node: ts.Node): void => {
-    if (kindOf(node) !== undefined) {
-      const at = nameStart(node, sf);
-      // A variable statement starts at `export const`; collectDeclarations keys the declarator name.
-      if (!nodes.has(at)) nodes.set(at, node);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sf);
+export function signatures(decls: readonly Declaration[]): Map<string, string> {
   const result = new Map<string, string>();
   for (const decl of decls) {
-    const node = nodes.get(decl.namePos);
-    const text = node ? fullSignatureOf(node, sf) : decl.signature;
+    const text = decl.fullSignature ?? decl.signature;
     const key = matchKey(decl);
     const prev = result.get(key);
     result.set(key, prev === undefined ? text : `${prev}\n${text}`);
@@ -147,8 +128,8 @@ export function classifyFile(input: FileInput): FileChanges {
 
   const afterByKey = new Map(afterDecls.map((d) => [matchKey(d), d] as const));
   const beforeByKey = new Map(beforeDecls.map((d) => [matchKey(d), d] as const));
-  const afterSigs = afterSide ? signatures(afterSide.sf, afterDecls) : new Map<string, string>();
-  const beforeSigs = beforeSide ? signatures(beforeSide.sf, beforeDecls) : new Map<string, string>();
+  const afterSigs = afterSide ? signatures(afterDecls) : new Map<string, string>();
+  const beforeSigs = beforeSide ? signatures(beforeDecls) : new Map<string, string>();
 
   const keys = [...new Set([...afterMap.touched.keys(), ...beforeMap.touched.keys()])];
   const changes: DeclChange[] = [];

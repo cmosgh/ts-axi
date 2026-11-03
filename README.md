@@ -116,6 +116,7 @@ One dependency: the `typescript` compiler API (ADR in `docs/adr/0001-typescript-
 - `outline`, `def` and the home view only parse files (`ts.createSourceFile`): no tsconfig needed, well under a second.
 - `refs`, `callers` and `impact` build a `LanguageService` over the nearest `tsconfig.json` (or an implicit project of every source file when none exists, with a warning; in a monorepo or an implicit project of more than 3000 files, over the importer subgraph described above) and ask it for references and call hierarchy. Symbol identity comes from the checker, so `user.save` resolves to `User.save` through imports and re-exports.
 - `impact` reads the "before" version of touched files with `git show` and compares signatures to classify each change (`added`, `removed`, `signature`, `body`, `type`, `modified`). Uses it cannot follow (access through `any`, dynamic string keys) are reported as `blind_spots`, never silently dropped.
+- Script-style JavaScript (AngularJS registrations, Meteor methods and helpers, `module.exports` objects, prototype methods, IIFE helpers) gets nested declarations with qualified names, so `outline` lists them and `impact` names the function an edit touches instead of a file-level change.
 - Type errors in the analysed project never block anything; they are reported as a `diagnostics` count.
 
 Every semantic command starts cold and prints `elapsed_ms`.

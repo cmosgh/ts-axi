@@ -138,33 +138,88 @@ export function positionOf(group: SymbolGroup): string {
   return `${d.file}:${d.nameLine}`;
 }
 
-export function matchRows(groups: SymbolGroup[]): Array<Record<string, unknown>> {
-  return groups.map((g) => ({
+/** Ambiguity lists stop here; the narrowing hints cover the rest. */
+export const MATCH_ROWS = 20;
+
+/** `matches` (first MATCH_ROWS, shallowest first) plus `matches_total` / `truncated` past that. */
+export function matchRows(groups: SymbolGroup[]): Record<string, unknown> {
+  const rows = groups.slice(0, MATCH_ROWS).map((g) => ({
     file: g.primary.file,
     line: g.decls[0]!.nameLine,
     kind: g.primary.kind,
     exported: g.primary.exported,
     signature: g.decls[0]!.signature,
   }));
+  return { matches: rows, ...(groups.length > MATCH_ROWS ? { matches_total: groups.length, truncated: true } : {}) };
 }
 
-/** Concrete hints that narrow an ambiguous name to one Symbol. */
-export function narrowHints(command: string, groups: SymbolGroup[], f: TargetFilters, label: string): string[] {
-  const hints = groups.slice(0, 2).map((g) => `Run \`ts-axi ${command} ${positionOf(g)}\` for the one in ${g.primary.file}`);
-  const first = groups[0]!.primary;
-  const dirs = new Set(groups.map((g) => posix.dirname(g.primary.file)));
-  const dir = posix.dirname(first.file);
-  if (dirs.size > 1 && [...dirs].filter((d) => d === dir || d.startsWith(`${dir}/`)).length === 1) {
-    hints.push(`Run \`ts-axi ${command} ${label} --in ${dir}\` to keep matches below ${dir}`);
-  } else {
-    hints.push(`Run \`ts-axi ${command} ${label} --in ${first.file}\` to keep matches in one file`);
+function countBy<T>(items: readonly T[], key: (item: T) => string | undefined): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const k = key(item);
+    if (k !== undefined) counts.set(k, (counts.get(k) ?? 0) + 1);
   }
-  const kinds = new Set(groups.map((g) => g.primary.kind));
-  if (kinds.size > 1 && !f.kind) hints.push(`Run \`ts-axi ${command} ${label} --kind ${first.kind}\` to keep one kind`);
-  if (!f.exported && groups.some((g) => g.primary.exported) && groups.some((g) => !g.primary.exported)) {
-    hints.push(`Run \`ts-axi ${command} ${label} --exported\` to keep exported Declarations`);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+/** Longest common directory of `files` ('' when they share none). */
+function commonDir(files: readonly string[]): string {
+  const split = files.map((f) => posix.dirname(f).split("/").filter((p) => p !== "" && p !== "."));
+  const first = split[0] ?? [];
+  let n = 0;
+  while (n < first.length && split.every((parts) => parts[n] === first[n])) n++;
+  return first.slice(0, n).join("/");
+}
+
+const IDENT_PART = /^[A-Za-z_$][\w$]*$/;
+
+/** Root-relative path → the form `--in` expects (relative to cwd). */
+function cwdGlob(ctx: ProjectContext, rootRel: string): string {
+  const prefix = relative(ctx.root, ctx.cwd).split(sep).join("/");
+  if (!prefix || prefix.startsWith("..")) return rootRel;
+  return posix.relative(prefix, rootRel) || ".";
+}
+
+/** Concrete hints that narrow an ambiguous name, computed from the matches themselves. */
+export function narrowHints(ctx: ProjectContext, command: string, groups: SymbolGroup[], f: TargetFilters, label: string, target?: Extract<Target, { kind: "name" }>): string[] {
+  const total = groups.length;
+  const hints = groups.slice(0, 2).map((g) => `Run \`ts-axi ${command} ${positionOf(g)}\` for the one in ${g.primary.file}`);
+  const files = groups.map((g) => g.primary.file);
+  // --in: the subtrees right below the common directory, largest first.
+  const prefix = commonDir(files);
+  const below = countBy(files, (file) => {
+    const rest = (prefix ? file.slice(prefix.length + 1) : file).split("/");
+    return rest.length > 1 ? posix.join(prefix, rest[0]!) : file;
+  });
+  if (below.length > 1) {
+    for (const [dir, n] of below.slice(0, 2)) hints.push(`Run \`ts-axi ${command} ${label} --in ${cwdGlob(ctx, dir)}\` to keep ${n} of ${total}`);
+  } else if (prefix) {
+    hints.push(`Run \`ts-axi ${command} ${label} --in ${cwdGlob(ctx, prefix)}\` - all ${total} are below ${prefix}`);
+  }
+  if (!f.kind) {
+    const kinds = countBy(groups, (g) => g.primary.kind);
+    if (kinds.length > 1) for (const [kind, n] of kinds.slice(0, 3)) hints.push(`Run \`ts-axi ${command} ${label} --kind ${kind}\` to keep ${n} of ${total}`);
+  }
+  if (target && target.member === undefined) {
+    const parents = countBy(groups, (g) => g.primary.parentName?.split(".").pop());
+    const distinct = parents.length > 1 || (parents.length === 1 && groups.some((g) => g.primary.parentName === undefined));
+    if (distinct) {
+      for (const [parent, n] of parents.filter(([p]) => IDENT_PART.test(p)).slice(0, 2)) {
+        hints.push(`Run \`ts-axi ${command} ${parent}.${target.name}${filterSuffixOf(label, target)}\` to keep ${n} of ${total}`);
+      }
+    }
+  }
+  const exported = groups.filter((g) => g.primary.exported).length;
+  if (!f.exported && exported > 0 && exported < total) {
+    hints.push(`Run \`ts-axi ${command} ${label} --exported\` to keep ${exported} of ${total}`);
   }
   return hints;
+}
+
+/** The flags part of a hint label (`label` = target + filter suffix). */
+function filterSuffixOf(label: string, target: Extract<Target, { kind: "name" }>): string {
+  const bare = target.member ? `${target.name}.${target.member}` : target.name;
+  return label.startsWith(bare) ? label.slice(bare.length) : "";
 }
 
 // --- Position targets ---
@@ -230,6 +285,9 @@ export function resolvePosition(index: SyntacticIndex, cwd: string, target: Extr
     const hit = onLine.find((id) => id.getStart(sf) <= offset && offset <= id.end) ?? onLine.find((id) => id.getStart(sf) >= offset);
     return hit ? pick(hit) : { kind: "none", abs, file, reason: `no identifier at ${file}:${target.line}:${target.col}` };
   }
+  // A string-registered name has no identifier: its line stands for it.
+  const nameless = decls.find((d) => d.nameless && d.nameLine === target.line);
+  if (nameless) return { kind: "decl", decl: nameless, abs };
   if (onLine.length === 0) return { kind: "none", abs, file, reason: `no identifier on ${file}:${target.line}` };
   const constructorDecl = decls.find((d) => d.nameLine === target.line && d.name === "constructor");
   const declared = onLine.find((id) => declFor(id)) ?? onLine.find(isDeclarationName);
