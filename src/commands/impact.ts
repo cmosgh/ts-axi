@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import ts from "typescript";
 import { bool, intFlag, parseArgs, type ParsedArgs, flag } from "../args.js";
@@ -20,18 +20,19 @@ import {
   type DeclChange,
   type FileInput,
 } from "../impact.js";
-import { createSemanticProject, loadProject, SOURCE_EXTENSIONS, type CallSite, type ReferenceEntry, type SemanticProject, type ViaEntry } from "../project.js";
+import { loadProject, SOURCE_EXTENSIONS, type CallSite, type ReferenceEntry, type SemanticProject, type ViaEntry } from "../project.js";
 import { block, helpBlock, out } from "../render.js";
 import { isTestFile } from "../settings.js";
 import { isFunctionLike, type Declaration, type Kind } from "../symbols.js";
-import { contextOf, lineOf, open, type Opened } from "./common.js";
+import { IMPACT_HOPS, scopeFields, scopeHelp, semanticFor } from "../scope.js";
+import { walkFiles } from "../walk.js";
+import { contextOf, lineOf, open, projectFields, type Opened } from "./common.js";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 const SIDE_ROWS = 20;
 /** Non-TS files `--grep` also searches: templates that use TS exports the checker never sees. */
 const GREP_EXTRA = [".astro", ".vue", ".svelte", ".mdx", ".html"];
-const SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage"]);
 
 export const IMPACT_HELP = `usage: ts-axi impact [<git-range> | -] [flags]
 input:
@@ -50,6 +51,7 @@ output:
   blind_spots[n]{symbol,file,line,reason} = uses the checker cannot follow (any; string keys; unresolved export *)
   skipped[n]{file,reason} = files in the diff that were not analysed (.astro, .json, outside the Project)
   tests: 0 on an exported signature or body change = no Test file references it
+  scope = in a monorepo without -P the program is the touched files + two levels of importers (scope_partial: true when capped)
 examples[5]:
   ts-axi impact
   ts-axi impact --staged
@@ -267,19 +269,7 @@ function blindSpots(semantic: SemanticProject, names: Map<string, string>, chang
 }
 
 function walkExtra(dir: string, outFiles: string[]): void {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) walkExtra(join(dir, entry.name), outFiles);
-    } else if (GREP_EXTRA.some((ext) => entry.name.endsWith(ext))) {
-      outFiles.push(join(dir, entry.name));
-    }
-  }
+  outFiles.push(...walkFiles(dir, { accept: (name) => GREP_EXTRA.some((ext) => name.endsWith(ext)) }).files);
 }
 
 interface Unresolved {
@@ -371,7 +361,7 @@ function rerun(arg: string | undefined, parsed: ParsedArgs, extra: string): stri
  * them): name the sibling tsconfig that includes them so tests get counted.
  */
 function specFilesHint(cwd: string, opened: Opened, skipped: Array<{ file: string; reason: string }>, noTests: boolean): string | undefined {
-  const tsconfig = opened.location.path;
+  const tsconfig = opened.index.project.tsconfig;
   if (!tsconfig) return undefined;
   const outside = skipped.filter((s) => s.reason === "not in the Project");
   const tests = outside.filter((s) => isTestFile(s.file, opened.settings));
@@ -452,6 +442,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   const total = declChanges.length + fileLevel.length;
   const header = {
     ...(warnings.length > 0 ? { warning: warnings.join("; ") } : {}),
+    ...projectFields(opened),
     base: input.base,
     head: input.head,
     changes: total,
@@ -477,7 +468,13 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   }
 
   // --- References (semantic, on the checkout) ---
-  const semantic = createSemanticProject(opened.index);
+  // Scoped workspace: touched files + two levels of importers; deleted or renamed-away paths still resolve so their importers count.
+  const { semantic, scope } = semanticFor(
+    opened,
+    analysed.filter((f) => f.status !== "deleted").map((f) => opened.index.abs(f.path)),
+    IMPACT_HOPS,
+    analysed.flatMap((f) => (f.status === "deleted" ? [f.path] : f.oldPath ? [f.oldPath] : [])).map((p) => opened.index.abs(p)),
+  );
   const rows: Row[] = declChanges.map((change) => {
     const source = change.after ?? change.before!;
     const live = change.after ? opened.index.declarations(opened.index.abs(change.file)).find((d) => matchKey(d) === change.key) : undefined;
@@ -586,6 +583,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   if (skipped.length > 0) help.push("Skipped files are not TS or JS source of the Project - review them by hand");
   const specHint = specFilesHint(ctx.cwd, opened, skipped, listed.every((r) => fileCounts(r).tests === 0));
   if (specHint) help.push(specHint);
+  help.push(...scopeHelp(scope));
   const notes = rows
     .filter((r) => r.change.change === "signature" && r.bases.length > 0)
     .map((r) => ({ symbol: r.symbol, note: `implements ${r.bases.join(" and ")}` }));
@@ -617,6 +615,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       ...(grep ? capped("unresolved", unresolved) : {}),
       ...depthLevels(semantic, rows, depth),
       ...skippedBlock,
+      ...scopeFields(scope),
       elapsed_ms: Math.round(performance.now() - started),
       ...(diagnostics > 0 ? { diagnostics } : {}),
     }),

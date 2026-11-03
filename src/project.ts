@@ -1,14 +1,17 @@
 // Project discovery and the two engine paths (ADR 0001): a syntactic index
 // over `ts.createSourceFile`, and a LanguageService for semantic queries.
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 import { usageError } from "./errors.js";
 import { classifyReferenceGroups, type GroupDescriptor, type RefDescriptor, type Through } from "./references.js";
 import { collectDeclarations, type Declaration } from "./symbols.js";
+import { byDepthThenPath, listFiles } from "./walk.js";
+import { detectWorkspace, hasMultiProjectSignal, isMultiProject, type Workspace, type WorkspaceKind } from "./workspace.js";
 
 export const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"] as const;
-const SKIP_DIRS = new Set(["node_modules", "dist", "build", ".git"]);
+/** An implicit project above this many files is analysed by importer subgraph, not as a whole. */
+export const IMPLICIT_SCOPE_THRESHOLD = 3_000;
 
 export const IMPLICIT_WARNING = "no tsconfig.json found - implicit project";
 
@@ -85,26 +88,9 @@ function isSourceFile(name: string): boolean {
   return SOURCE_EXTENSIONS.some((ext) => name.endsWith(ext)) && !/\.d\.[mc]?ts$/.test(name);
 }
 
-/** Every source file below `root`, minus node_modules/dist/build/.git and `.d.ts`. */
+/** Every source file below `root` from the shared listing (`src/walk.ts`: git, else fs walk), minus `.d.ts`. */
 export function walkSourceFiles(root: string): string[] {
-  const files: string[] = [];
-  const visit = (dir: string): void => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) visit(join(dir, entry.name));
-      } else if (entry.isFile() && isSourceFile(entry.name)) {
-        files.push(join(dir, entry.name));
-      }
-    }
-  };
-  visit(root);
-  return files.sort();
+  return listFiles(root, isSourceFile).files;
 }
 
 export const IMPLICIT_COMPILER_OPTIONS: ts.CompilerOptions = {
@@ -120,6 +106,12 @@ export const IMPLICIT_COMPILER_OPTIONS: ts.CompilerOptions = {
   resolveJsonModule: true,
 };
 
+/** Set when semantic commands build their program from an importer subgraph instead of the whole Project. */
+export interface ProjectScope {
+  workspace: Workspace;
+  kind: WorkspaceKind;
+}
+
 export interface ParsedProject {
   root: string;
   tsconfig: string | null;
@@ -127,6 +119,61 @@ export interface ParsedProject {
   /** Absolute source file paths (node_modules excluded). */
   fileNames: string[];
   options: ts.CompilerOptions;
+  /** A references-only tsconfig expanded to this many referenced configs. */
+  referenced?: number;
+  scope?: ProjectScope;
+}
+
+export interface ExpandedConfig {
+  path: string;
+  fileNames: string[];
+  options: ts.CompilerOptions;
+}
+
+function readTsconfig(path: string): ts.ParsedCommandLine | undefined {
+  const read = ts.readConfigFile(path, ts.sys.readFile);
+  if (read.error) return undefined;
+  return ts.parseJsonConfigFileContent(read.config, ts.sys, dirname(path), undefined, path);
+}
+
+function sourceNames(parsed: ts.ParsedCommandLine): string[] {
+  return parsed.fileNames
+    .map((f) => resolve(f))
+    .filter((f) => !f.split(sep).includes("node_modules") && SOURCE_EXTENSIONS.some((ext) => f.endsWith(ext)));
+}
+
+/**
+ * The configs a tsconfig stands for: itself, or - when it has `references` and no files of its
+ * own (an Nx project shell) - its referenced configs, recursively and deduplicated.
+ */
+export function expandTsconfig(path: string): ExpandedConfig[] {
+  const result: ExpandedConfig[] = [];
+  const seen = new Set<string>();
+  const visit = (file: string): void => {
+    const abs = real(file);
+    if (seen.has(abs)) return;
+    seen.add(abs);
+    const parsed = readTsconfig(abs);
+    if (!parsed) return;
+    const fileNames = sourceNames(parsed);
+    const refs = parsed.projectReferences ?? [];
+    if (fileNames.length === 0 && refs.length > 0) {
+      for (const ref of refs) {
+        const target = ts.resolveProjectReferencePath(ref);
+        if (existsSync(target)) visit(target);
+      }
+      return;
+    }
+    result.push({ path: abs, fileNames, options: parsed.options });
+  };
+  visit(path);
+  return result;
+}
+
+/** One config's options for a union: the first config's, with every config's `types` merged. */
+function unionOptions(configs: readonly ExpandedConfig[]): ts.CompilerOptions {
+  const types = configs.some((c) => c.options.types === undefined) ? undefined : [...new Set(configs.flatMap((c) => c.options.types ?? []))];
+  return { ...configs[0]!.options, ...(types ? { types } : {}) };
 }
 
 /** Resolve the Project's file list and compiler options. Cheap: reads directories, parses no source. */
@@ -138,11 +185,14 @@ export function loadProject(root: string, location: TsconfigLocation): ParsedPro
   if (read.error) {
     throw usageError(`cannot read ${location.path} - ${ts.flattenDiagnosticMessageText(read.error.messageText, " ")}`);
   }
-  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, dirname(location.path), undefined, location.path);
-  const fileNames = parsed.fileNames
-    .map((f) => resolve(f))
-    .filter((f) => !f.split(sep).includes("node_modules") && SOURCE_EXTENSIONS.some((ext) => f.endsWith(ext)));
-  return { root, tsconfig: location.path, implicit: false, fileNames, options: { ...parsed.options, noEmit: true } };
+  const configs = expandTsconfig(location.path);
+  const self = configs.length === 1 && configs[0]!.path === real(location.path);
+  if (self || configs.length === 0) {
+    const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, dirname(location.path), undefined, location.path);
+    return { root, tsconfig: location.path, implicit: false, fileNames: sourceNames(parsed), options: { ...parsed.options, noEmit: true } };
+  }
+  const fileNames = [...new Set(configs.flatMap((c) => c.fileNames))].sort();
+  return { root, tsconfig: location.path, implicit: false, fileNames, options: { ...unionOptions(configs), noEmit: true }, referenced: configs.length };
 }
 
 function scriptKind(file: string): ts.ScriptKind {
@@ -202,40 +252,20 @@ const OUTSIDE_WALK_MS = 600;
 
 /**
  * Declarations matching `query` in source files below the repo root that are not in the Project
- * (syntactic, bounded by file count and time; stops after `max` hits).
+ * (syntactic; the fs fallback is bounded by file count and time; at most `max` hits, shallowest paths first).
  */
 export function findOutsideProject(index: SyntacticIndex, query: NameQuery, max = 3): Declaration[] {
   const inProject = new Set(index.files);
-  const deadline = Date.now() + OUTSIDE_WALK_MS;
+  const { files } = listFiles(index.root, isSourceFile, { maxFiles: OUTSIDE_WALK_CAP, deadline: Date.now() + OUTSIDE_WALK_MS });
   const hits: Declaration[] = [];
-  const stack = [index.root];
-  let visited = 0;
-  while (stack.length > 0 && hits.length < max && visited < OUTSIDE_WALK_CAP && Date.now() <= deadline) {
-    const dir = stack.pop()!;
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries.sort((a, b) => b.name.localeCompare(a.name))) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) stack.push(path);
-        continue;
-      }
-      if (!entry.isFile() || !isSourceFile(entry.name) || inProject.has(path)) continue;
-      visited++;
-      const text = index.text(path);
-      if (text === undefined || !text.includes(query.name)) continue;
-      for (const decl of index.declarations(path)) {
-        if (declMatches(decl, query)) hits.push(decl);
-        if (hits.length >= max) break;
-      }
-      if (hits.length >= max) break;
-    }
+  for (const path of files.sort((a, b) => byDepthThenPath(index.rel(a), index.rel(b)))) {
+    if (inProject.has(path)) continue;
+    const text = index.text(path);
+    if (text === undefined || !text.includes(query.name)) continue;
+    for (const decl of index.declarations(path)) if (declMatches(decl, query)) hits.push(decl);
+    if (hits.length >= max) break;
   }
-  return hits.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+  return hits.slice(0, max).sort((a, b) => byDepthThenPath(a.file, b.file) || a.line - b.line);
 }
 
 /** Nearest `tsconfig.json` from the directory of `abs` up to `root` (inclusive). */
@@ -388,20 +418,29 @@ export interface SemanticProject {
 
 const FULL_DIAGNOSTICS_LIMIT = 300;
 
-export function createSemanticProject(index: SyntacticIndex): SemanticProject {
+/** A program over chosen root files (an importer subgraph) instead of the whole Project. */
+export interface ProgramScope {
+  rootNames: string[];
+  options: ts.CompilerOptions;
+  currentDirectory: string;
+}
+
+export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScope): SemanticProject {
   const started = performance.now();
   const { project } = index;
-  const fileNames = project.fileNames;
+  const fileNames = scope?.rootNames ?? project.fileNames;
+  const options = scope?.options ?? project.options;
   const snapshots = new Map<string, ts.IScriptSnapshot | undefined>();
-  const currentDirectory = project.tsconfig ? dirname(project.tsconfig) : index.root;
+  const currentDirectory = scope?.currentDirectory ?? (project.tsconfig ? dirname(project.tsconfig) : index.root);
+  const indexed = new Set(index.files);
 
   const host: ts.LanguageServiceHost = {
-    getCompilationSettings: () => project.options,
+    getCompilationSettings: () => options,
     getScriptFileNames: () => fileNames,
     getScriptVersion: () => "1",
     getScriptSnapshot(file) {
       if (!snapshots.has(file)) {
-        const text = index.files.includes(file) ? index.text(file) : ts.sys.readFile(file);
+        const text = indexed.has(file) ? index.text(file) : ts.sys.readFile(file);
         snapshots.set(file, text === undefined ? undefined : ts.ScriptSnapshot.fromString(text));
       }
       return snapshots.get(file);
@@ -630,7 +669,8 @@ export function createSemanticProject(index: SyntacticIndex): SemanticProject {
       return service.getQuickInfoAtPosition(absFile, pos);
     },
     diagnosticsCount(touched = []) {
-      const files = projectFiles.length <= FULL_DIAGNOSTICS_LIMIT ? projectFiles : touched.map((f) => index.abs(f));
+      // A subgraph program mixes projects under one set of options: count the touched files only.
+      const files = !scope && projectFiles.length <= FULL_DIAGNOSTICS_LIMIT ? projectFiles : touched.map((f) => index.abs(f));
       let count = 0;
       for (const file of files) {
         const sf = program.getSourceFile(file);
@@ -651,7 +691,22 @@ export interface ProjectContext {
   warning?: string;
 }
 
-/** Repo root + tsconfig discovery + syntactic index in one call. */
+/** The workspace as one file set; each semantic command scopes its own program from it. */
+function scopedProject(root: string, workspace: Workspace, implicit: boolean): ParsedProject {
+  return {
+    root,
+    tsconfig: null,
+    implicit,
+    fileNames: workspace.sourceFiles,
+    options: IMPLICIT_COMPILER_OPTIONS,
+    scope: { workspace, kind: implicit ? "implicit" : workspace.kind },
+  };
+}
+
+/**
+ * Repo root + tsconfig discovery + syntactic index in one call. Without `-P` / `.ts-axi.json`
+ * `project`, a multi-project workspace (or a large implicit project) becomes one scoped file set.
+ */
 export function openProject(
   cwd: string,
   options: { startDir?: string; override?: string; settingsProject?: string; settingsRoot?: string } = {},
@@ -664,6 +719,14 @@ export function openProject(
     settingsRoot: options.settingsRoot ?? root,
     ...(existsSync(join(root, ".git")) ? { stopAt: root } : {}),
   });
-  const index = createSyntacticIndex(root, loadProject(root, location));
-  return { cwd, root, location, index, ...(location.implicit ? { warning: IMPLICIT_WARNING } : {}) };
+  const explicit = options.override !== undefined || options.settingsProject !== undefined;
+  let project: ParsedProject | undefined;
+  if (!explicit && (location.implicit || hasMultiProjectSignal(root))) {
+    const workspace = detectWorkspace(root);
+    if (isMultiProject(workspace.kind)) project = scopedProject(root, workspace, false);
+    else if (location.implicit && workspace.sourceFiles.length > IMPLICIT_SCOPE_THRESHOLD) project = scopedProject(root, workspace, true);
+  }
+  project ??= loadProject(root, location);
+  const index = createSyntacticIndex(root, project);
+  return { cwd, root, location, index, ...(project.implicit ? { warning: IMPLICIT_WARNING } : {}) };
 }

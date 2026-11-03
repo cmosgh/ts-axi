@@ -75,6 +75,20 @@ npx skills add cmosgh/ts-axi --skill ts-axi
 
 <!-- TODO(phase 4): paste real examples for def / refs / outline / config from the fixture project. -->
 
+## Monorepos
+
+No configuration and no new files in your repo: ts-axi detects the layout from what is already there - `nx.json` (projects = `project.json` dirs, or a legacy `workspace.json`), `pnpm-workspace.yaml`, `package.json` `workspaces`, or a root `tsconfig.json` that only holds `references`. The home view prints `workspace: nx (14 projects)`.
+
+Without `-P`, `refs`, `callers` and `impact` do not type-check the whole repo. They build the program from a subgraph: the declaring file (for `impact`, the touched files) plus every file that imports it, found by a fast text scan of import specifiers that follows `tsconfig.base.json` `paths`, workspace package names and `export * from` barrels. A caller in another project is found; the cost tracks the subgraph, not the repo. Each result says what was analysed:
+
+```
+scope: nx workspace - 30 of 5433 files (seeds 1; importers 29)
+```
+
+`scope_partial: true` means the importer scan stopped at its cap (50k files or 3 s); the help line says what is missing. `-P <tsconfig>` still analyses exactly one project; when it finds nothing, `found_outside_project` lists the importers outside it. A `-P` tsconfig that only holds `references` (an Nx project's `tsconfig.json`) is expanded to the configs it references: `tsconfig: libs/shared/tsconfig.json (2 referenced configs)`.
+
+Files are listed with `git ls-files` (tracked plus untracked, gitignore applied), so nested worktrees and ignored copies are never analysed. Outside git, a directory walk skips `node_modules`, build output, `.claude`, `.cursor`, `.idea`, `.vscode` and any nested checkout.
+
 ## Test files
 
 A file counts as a test by path pattern. Defaults: `**/*.test.*`, `**/*.spec.*`, `**/__tests__/**`, `**/test/**`, `**/tests/**`, `**/e2e/**`. The home view shows `test_globs` and `test_files` so a wrong rule is visible.
@@ -100,7 +114,7 @@ Any other key is a `VALIDATION_ERROR` naming the valid ones. `--test-glob <glob>
 One dependency: the `typescript` compiler API (ADR in `docs/adr/0001-typescript-language-service-engine.md`).
 
 - `outline`, `def` and the home view only parse files (`ts.createSourceFile`): no tsconfig needed, well under a second.
-- `refs`, `callers` and `impact` build a `LanguageService` over the nearest `tsconfig.json` (or an implicit project of every source file when none exists, with a warning) and ask it for references and call hierarchy. Symbol identity comes from the checker, so `user.save` resolves to `User.save` through imports and re-exports.
+- `refs`, `callers` and `impact` build a `LanguageService` over the nearest `tsconfig.json` (or an implicit project of every source file when none exists, with a warning; in a monorepo or an implicit project of more than 3000 files, over the importer subgraph described above) and ask it for references and call hierarchy. Symbol identity comes from the checker, so `user.save` resolves to `User.save` through imports and re-exports.
 - `impact` reads the "before" version of touched files with `git show` and compares signatures to classify each change (`added`, `removed`, `signature`, `body`, `type`, `modified`). Uses it cannot follow (access through `any`, dynamic string keys) are reported as `blind_spots`, never silently dropped.
 - Type errors in the analysed project never block anything; they are reported as a `diagnostics` count.
 

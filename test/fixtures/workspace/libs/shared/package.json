@@ -1,0 +1,9 @@
+{
+  "name": "@acme/shared",
+  "version": "0.0.0",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./src/index.ts",
+    "./money": "./src/lib/money.ts"
+  }
+}

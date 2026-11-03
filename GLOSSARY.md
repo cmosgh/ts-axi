@@ -63,4 +63,16 @@ A source file that the project counts as a test, by path pattern. The set of pat
 
 ## Project
 
-The set of source files analysed together, as the nearest `tsconfig.json` defines it, or an implicit one when no `tsconfig.json` is found.
+The set of source files analysed together, as the nearest `tsconfig.json` defines it (a tsconfig that only references others stands for the union of the ones it references), or an implicit one when no `tsconfig.json` is found. Inside a Workspace, also one of its members: a directory with its own tsconfigs, such as an Nx project or a workspace package.
+
+## Workspace
+
+A repository holding several Projects that use each other, recognised from files it already has (`nx.json`, `pnpm-workspace.yaml`, `package.json` `workspaces`, a root tsconfig of references). Its path aliases and package names decide how one Project imports another.
+
+## Importer
+
+A file that imports another file, directly or through a barrel that re-exports it. Found by reading import specifiers as text, before any type check.
+
+## Scope
+
+The files a semantic command actually analysed: the seed files (the declaring file, or the files a Change touches) plus their Importers. Printed with every result in a Workspace, and marked partial when the search for Importers stopped early.

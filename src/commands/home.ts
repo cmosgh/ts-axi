@@ -2,13 +2,15 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { expectPositionals, flag, flags, parseArgs } from "../args.js";
+import type { CommandContext } from "../context.js";
 import { usageError } from "../errors.js";
 import { currentBranch, dirtyFileCount, isGitRepo } from "../git.js";
 import { block, helpBlock, out } from "../render.js";
 import { SETTINGS_FILE, isTestFile, loadSettings, readSettingsFile, type Settings } from "../settings.js";
+import { listFiles, skipDir } from "../walk.js";
+import { detectWorkspace, hasMultiProjectSignal, isMultiProject, type Workspace } from "../workspace.js";
 
 const SOURCE_EXT = /\.(?:[cm]?[jt]s|[jt]sx)$/;
-const SKIP_DIRS = new Set(["node_modules", "dist", "build", ".git"]);
 /** The view runs at session start: bound the file walk by count and time. */
 const WALK_CAP = 20_000;
 const WALK_DEADLINE_MS = 600;
@@ -24,8 +26,8 @@ interface Counted {
   capped: boolean;
 }
 
-/** Does `dir` hold a TS/JS source within `depth` levels (node_modules skipped)? */
-function hasSources(dir: string, depth: number): boolean {
+/** Does `dir` hold a TS/JS source within `depth` levels (shared skip rule)? */
+function hasSources(dir: string, depth: number, root = dir): boolean {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -36,35 +38,12 @@ function hasSources(dir: string, depth: number): boolean {
     if (entry.isFile() && SOURCE_EXT.test(entry.name)) return true;
   }
   if (depth === 0) return false;
-  return entries.some(
-    (e) => e.isDirectory() && e.name !== "node_modules" && e.name !== ".git" && hasSources(join(dir, e.name), depth - 1),
-  );
+  return entries.some((e) => e.isDirectory() && !skipDir(e.name, join(dir, e.name), root) && hasSources(join(dir, e.name), depth - 1, root));
 }
 
-/** Implicit project: every source below `root`, minus node_modules, dist, build, .git. */
+/** Implicit project: every source below `root` from the shared listing (git, else a bounded fs walk). */
 function walkSources(root: string): Counted {
-  const files: string[] = [];
-  const deadline = Date.now() + WALK_DEADLINE_MS;
-  let capped = false;
-  const stack = [root];
-  while (stack.length > 0 && !capped) {
-    const dir = stack.pop()!;
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) stack.push(join(dir, entry.name));
-      } else if (entry.isFile() && SOURCE_EXT.test(entry.name)) {
-        files.push(join(dir, entry.name));
-      }
-    }
-    if (files.length >= WALK_CAP || Date.now() > deadline) capped = true;
-  }
-  return { files, capped };
+  return listFiles(root, (name) => SOURCE_EXT.test(name) && !/\.d\.[mc]?ts$/.test(name), { maxFiles: WALK_CAP, deadline: Date.now() + WALK_DEADLINE_MS });
 }
 
 function findTsconfig(cwd: string): string | undefined {
@@ -78,13 +57,15 @@ function findTsconfig(cwd: string): string | undefined {
   }
 }
 
-async function tsconfigFiles(tsconfig: string): Promise<Counted> {
-  const ts = (await import("typescript")).default;
-  const read = ts.readConfigFile(tsconfig, ts.sys.readFile);
-  if (read.error) return { files: [], capped: false };
-  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, dirname(tsconfig), undefined, tsconfig);
-  const files = parsed.fileNames.filter((f) => !f.split(/[\\/]/).includes("node_modules"));
-  return { files, capped: false };
+async function tsconfigFiles(tsconfig: string, root: string): Promise<Counted & { referenced?: number }> {
+  // Loaded lazily: the TypeScript module is only needed when a tsconfig exists.
+  const { loadProject } = await import("../project.js");
+  try {
+    const project = loadProject(root, { path: tsconfig, implicit: false });
+    return { files: project.fileNames, capped: false, ...(project.referenced !== undefined ? { referenced: project.referenced } : {}) };
+  } catch {
+    return { files: [], capped: false };
+  }
 }
 
 function rel(root: string, path: string): string {
@@ -118,10 +99,10 @@ function resolveTsconfig(cwd: string, settings: Settings): string | undefined {
   return findTsconfig(cwd);
 }
 
-export async function homeCommand(args: string[]): Promise<string> {
+export async function homeCommand(args: string[], ctx?: CommandContext): Promise<string> {
   const parsed = parseArgs(args, HOME_SPECS, "ts-axi");
   expectPositionals(parsed, 0, "ts-axi [-P <tsconfig>] [--test-glob <glob>]");
-  const cwd = process.cwd();
+  const cwd = ctx?.cwd ?? process.cwd();
   const project = flag(parsed, "--project");
   const settings = loadSettings(cwd, {
     testGlobs: flags(parsed, "--test-glob"),
@@ -129,7 +110,13 @@ export async function homeCommand(args: string[]): Promise<string> {
   });
 
   const tsconfig = resolveTsconfig(cwd, settings);
-  if (tsconfig === undefined && !hasSources(cwd, PROBE_DEPTH)) {
+  // Same rule as the semantic commands: no explicit project + a multi-project workspace = workspace scope.
+  let workspace: Workspace | undefined;
+  if (settings.project === undefined && (tsconfig === undefined || hasMultiProjectSignal(settings.root))) {
+    const detected = detectWorkspace(settings.root);
+    if (isMultiProject(detected.kind)) workspace = detected;
+  }
+  if (tsconfig === undefined && workspace === undefined && !hasSources(cwd, PROBE_DEPTH)) {
     return out(
       block({ project: "none" }),
       helpBlock([
@@ -141,7 +128,9 @@ export async function homeCommand(args: string[]): Promise<string> {
 
   const [git, counted] = await Promise.all([
     gitSummary(cwd),
-    tsconfig !== undefined ? tsconfigFiles(tsconfig) : Promise.resolve(walkSources(settings.root)),
+    workspace
+      ? Promise.resolve<Counted & { referenced?: number }>({ files: workspace.sourceFiles, capped: false })
+      : tsconfig !== undefined ? tsconfigFiles(tsconfig, settings.root) : Promise.resolve<Counted & { referenced?: number }>(walkSources(settings.root)),
   ]);
   const testFiles = counted.files.filter((f) => isTestFile(rel(settings.root, f), settings)).length;
   const plus = counted.capped ? "+" : "";
@@ -162,7 +151,12 @@ export async function homeCommand(args: string[]): Promise<string> {
   return out(
     block({
       root: settings.root,
-      tsconfig: tsconfig === undefined ? "implicit" : rel(settings.root, tsconfig),
+      ...(workspace ? { workspace: `${workspace.kind} (${workspace.projects.length} projects)` } : {}),
+      tsconfig: workspace
+        ? "nearest per file - workspace scope"
+        : tsconfig === undefined
+          ? "implicit"
+          : `${rel(settings.root, tsconfig)}${counted.referenced !== undefined ? ` (${counted.referenced} referenced configs)` : ""}`,
       source_files: counted.capped ? `${counted.files.length}${plus}` : counted.files.length,
       test_globs: settings.testGlobs.length,
       test_files: counted.capped ? `${testFiles}${plus}` : testFiles,

@@ -1,6 +1,6 @@
 # ts-axi plan
 
-AXI CLI (https://axi.md) for TypeScript/JavaScript code: a queryable symbol index whose purpose is `impact` - an agent reviewing a change learns which other parts of the code it affects without reading dozens of files. Read-only: no lint, no refactor, no rename. Vocabulary: `GLOSSARY.md`. Engine choice: `docs/adr/0001`.
+AXI CLI (https://axi.md) for TypeScript/JavaScript code: a queryable symbol index whose purpose is `impact` - an agent reviewing a change learns which other parts of the code it affects without reading dozens of files. Read-only: no lint, no refactor, no rename. Vocabulary: `GLOSSARY.md`. Engine choice: `docs/adr/0001`; monorepo scope: `docs/adr/0002`.
 
 Built like `../bb-axi`: same `args.ts` / `render.ts` / `errors.ts` / `version.ts`, `runAxiCli` from `axi-sdk-js`, TOON output, generated `skills/ts-axi/SKILL.md`.
 
@@ -12,7 +12,23 @@ Built like `../bb-axi`: same `args.ts` / `render.ts` / `errors.ts` / `version.ts
 - Project discovery: nearest `tsconfig.json` walking up from cwd (or from the target file's directory when a path is given); `-P <tsconfig>` overrides; `.ts-axi.json` `project` key as a per-repo default. No tsconfig anywhere → implicit project (`allowJs`, `strict: false`, every `.ts/.tsx/.js/.jsx/.mjs/.cjs` below the repo root minus `node_modules`, `dist`, `build`, `.git`) and a `warning: no tsconfig.json found - implicit project` line.
 - Languages: `.ts .tsx .js .jsx .mts .cts .mjs .cjs`. No Vue/Svelte SFC.
 - Excluded from results always: `node_modules`, `.d.ts` outside the project, files not in the Project.
-- Cold start per command in v1; every semantic command prints `elapsed_ms`. On large projects (>5k files) `impact` builds the program from the touched files plus their transitive importers only (an importer index built syntactically from import specifiers), not the whole tsconfig. Daemon / disk cache, multi-tsconfig (`references`), vitest/jest config auto-detect = phase 2.
+- Cold start per command in v1; every semantic command prints `elapsed_ms`. Daemon / disk cache, vitest/jest config auto-detect = phase 2.
+- A `-P` / `.ts-axi.json` / nearest tsconfig that has `references` and no files of its own after parsing is expanded to the union of its referenced configs (recursively, deduplicated; options of the first, `types` merged); output says `tsconfig: <path> (<n> referenced configs)`.
+
+### Workspaces (ADR 0002)
+
+No configuration, no new files in the analysed repo. `src/workspace.ts` detects from the repo root, most specific first, keeping every signal: `nx` (`nx.json`; projects = `project.json` dirs, or legacy `workspace.json`), `pnpm-workspaces` (`pnpm-workspace.yaml` `packages:` globs), `npm-workspaces` (`package.json` `workspaces`), `tsconfig-references` (root tsconfig with `references` and no `files`/`include`), `single`, `implicit`. It resolves projects `{name, dir, tsconfigs}` (tsconfig roles lib/app/spec/e2e/root by name, then by `include`), `paths` aliases (`tsconfig.base.json`, else root `tsconfig.json`, relative `extends` followed) and workspace packages (`package.json` `name`, `exports` subpaths, `main`/`types`, `src/index`).
+
+File listing (`src/walk.ts`, used by every walk): inside git one `git ls-files -z --cached --others --exclude-standard` from the root (nested repos/worktrees and gitignored dirs never appear), minus `node_modules`, `dist`, `build`, `coverage`, `tmp`, `.nx`, `.angular`, `.claude`, `.cursor`, `.idea`, `.vscode` segments. Outside git: an fs walk with the same skip list plus any directory below the root holding a `.git` entry. A linked worktree (`.git` file) is its own root. Several Declarations of a searched name are ordered by path depth, then alphabetically.
+
+Scope: with no `-P` and no `.ts-axi.json` `project`, a multi-project workspace (or an implicit project of more than 3000 files) is one file set for name lookup, and each semantic command builds its program from a subgraph:
+
+- Importer index (`src/importers.ts`, syntactic): every workspace source file read once; regex extraction of `import`/`export ... from`, side-effect imports, `require()`, `import()`, `vi.mock()`/`jest.mock()`; specifiers resolved through relative paths (`.js` → `.ts`, `index.*`), `paths` aliases, workspace package names (exports subpaths, `dist` → `src` best effort); unresolvable ones ignored. Cap 50k files / 3 s → `scope_partial: true` + a help line.
+- Seeds: the declaring file(s) for `refs`/`callers` (a use position first finds its Declaration in a one-file program), the touched files for `impact` (deleted and renamed-away paths still resolve so their importers count), the file itself for `def` on a use.
+- Hops: `refs`/`callers` 1, `impact` 2; a re-export (`export * from`, `export { x } from`) costs no hop, so importers of a barrel that re-exports the seed are direct importers.
+- Program: root names = seeds + importers (TypeScript resolves their own imports); options = the seed's nearest tsconfig (for a references shell, the referenced config that includes the seed, `types` merged across them), minus emit/layout options (`composite`, `rootDir`, `outDir`, ...), plus the workspace `paths` when the config has none, plus `paths` for workspace package names so they resolve to sources. `diagnostics` counts the touched files only.
+- Output: `scope: nx workspace - 23 of 9612 files (seeds 1; importers 22)` on semantic commands; the home view prints `workspace: nx (14 projects)` and `tsconfig: nearest per file - workspace scope`.
+- `-P` keeps one explicit project. `refs`/`callers` with `refs_total: 0` under `-P` in a workspace list `found_outside_project[n]{file,line}` (importers outside the Project whose text names the Symbol) + a hint to run without `-P`.
 - Type errors in the analysed project never block anything: `diagnostics: <n>` (count only) when > 0 on the semantic path.
 
 ## Commands
@@ -84,7 +100,8 @@ Located at the git root (or cwd when not a repo). Unknown keys → `VALIDATION_E
 ## Tests
 
 - `test/unit.test.ts`: target parsing, signature normalisation, change classification, diff parsing, test-glob matching, config merge.
-- `test/commands.test.ts`: whole CLI through `main()` against `test/fixtures/project/` (a small synthetic TS project: a few modules, a class with members, a barrel re-export, a test file, a `.js` file, an `any` access as a blind spot). `impact` tests copy the fixture to a temp dir, `git init`, commit, edit, and run. Fixture names are synthetic.
+- `test/workspace.test.ts`: workspace detection per kind, file walks (nested checkouts, tool dirs, linked worktree root), specifier resolution and barrel hops, the large implicit project.
+- `test/commands.test.ts`: whole CLI through `main()` against `test/fixtures/project/` and `test/fixtures/workspace/` (a synthetic Nx + pnpm workspace: `libs/shared` barrel and `paths` alias, two services, an app) (a small synthetic TS project: a few modules, a class with members, a barrel re-export, a test file, a `.js` file, an `any` access as a blind spot). `impact` tests copy the fixture to a temp dir, `git init`, commit, edit, and run. Fixture names are synthetic.
 - `pnpm run check` must pass on Node 22/24; the built CLI runs on Node 20.
 
 ## Phases
@@ -93,4 +110,5 @@ Located at the git root (or cwd when not a repo). Unknown keys → `VALIDATION_E
 2. Engine + `def` / `refs` / `callers` / `outline` + `cli.ts` wiring; `config`, `.ts-axi.json`, test-glob matching, `git.ts`, `diff.ts`, home view, `skill.ts`, README (done).
 3. `impact` (done). Shape as shipped: one `changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,files,tests}` table plus a flat `refs[n]{symbol,file,line,context}` table, `file_level[n]`, `blind_spots[n]{symbol,file,line,reason}`, `skipped[n]{file,reason}` for non-analysed files (`.astro`, `.css`, ...). `impact -` rebuilds the before version by reverse-applying hunks; untracked files count as `added`.
 4. Unit + command tests (`pnpm test`) and the opt-in integration suite over the vendored Astro sample (`pnpm run test:integration`, `test/integration/README.md`) (done).
-5. Phase 2 ideas (not now): daemon/cache, multi-tsconfig, vitest/jest config suggestion, token benchmark like mysql-axi.
+5. Workspace detection, importer-subgraph scope, references-only tsconfig expansion, git-based file listing (done).
+6. Phase 2 ideas (not now): daemon/cache, vitest/jest config suggestion, token benchmark like mysql-axi.

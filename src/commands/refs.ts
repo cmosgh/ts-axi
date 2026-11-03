@@ -1,9 +1,13 @@
 import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
-import { createSemanticProject, findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
+import { importerClosure } from "../importers.js";
+import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
+import { importerIndexFor, REFS_HOPS, scopeFields, scopeHelp, semanticFor, type ScopeInfo } from "../scope.js";
+import { byDepthThenPath } from "../walk.js";
+import { detectWorkspace, isMultiProject } from "../workspace.js";
 import { isTestFile } from "../settings.js";
 import { isFunctionLike, kindFromScriptElement, parseTarget, type Declaration, type Kind } from "../symbols.js";
 import {
@@ -15,6 +19,7 @@ import {
   narrowHints,
   open,
   positionStartDir,
+  projectFields,
   readFilters,
   resolveNameTarget,
   resolvePosition,
@@ -33,7 +38,10 @@ const SHARED_FLAGS = `--kind <function|class|method|property|variable|interface|
 const VIA_DOC = `via_interface: n (Iface.member) = References through an interface or base member the Symbol implements or overrides - they MAY reach it; not in refs_total
   via_implementations: n (Impl.member) = References to implementations or overrides of the Symbol; not in refs_total
   implementations: n = members that implement or override the Symbol (their Declarations are never refs)
-  matches: 0 under -P lists found_outside_project[n]{file,line} when the name is declared outside that Project`;
+  matches: 0 under -P lists found_outside_project[n]{file,line} when the name is declared outside that Project
+  refs_total: 0 under -P in a workspace lists found_outside_project[n]{file,line} = importers outside that Project
+  scope = in a monorepo without -P the program is the declaring file + its importers (scope_partial: true when the importer scan was capped)
+  tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
 flags[11]:
@@ -69,6 +77,8 @@ interface Resolved {
   absFile: string;
   pos: number;
   decl?: Declaration;
+  /** Files declaring the Symbol (overloads and merged Declarations may span files). */
+  seeds?: string[];
 }
 
 type Mode = "refs" | "calls";
@@ -146,7 +156,7 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
       );
     }
     const decl = groups[0]!.decls[0]!;
-    resolved = { absFile: opened.index.abs(decl.file), pos: decl.namePos, decl };
+    resolved = { absFile: opened.index.abs(decl.file), pos: decl.namePos, decl, seeds: [...new Set(groups[0]!.decls.map((d) => opened.index.abs(d.file)))] };
   } else {
     const at = resolvePosition(opened.index, ctx.cwd, target);
     if (at.kind === "none") {
@@ -161,7 +171,14 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
     resolved = at.kind === "decl" ? { absFile: at.abs, pos: at.decl.namePos, decl: at.decl } : { absFile: at.abs, pos: at.pos };
   }
 
-  const semantic = createSemanticProject(opened.index);
+  let built = semanticFor(opened, resolved.seeds ?? [resolved.absFile], resolved.decl ? REFS_HOPS : 0);
+  if (!resolved.decl && built.scope) {
+    // A use position: find its Declaration in a small program, then scope around the declaring file.
+    const at = built.semantic.definitionAt(resolved.absFile, resolved.pos);
+    if (at && at.line > 0) resolved = { absFile: at.absFile, pos: at.pos };
+    built = semanticFor(opened, [resolved.absFile], REFS_HOPS);
+  }
+  const { semantic, scope } = built;
   const def = semantic.definitionAt(resolved.absFile, resolved.pos);
   const decl =
     resolved.decl ??
@@ -169,11 +186,60 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const kind: Kind = decl?.kind ?? kindFromScriptElement(def?.kind ?? semantic.quickInfo(resolved.absFile, resolved.pos)?.kind ?? "");
   const symbol = decl?.qualifiedName ?? def?.name ?? label;
   const declaredAt = decl ? `${decl.file}:${decl.nameLine}` : def && def.line > 0 ? `${def.file}:${def.line}` : "(outside the Project)";
-  const header = { ...warning, symbol, kind, declared_at: declaredAt };
+  const header = { ...warning, ...projectFields(opened), symbol, kind, declared_at: declaredAt };
+  const explicit = Boolean(project || opened.settings.project);
+  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile };
 
   return mode === "calls"
-    ? renderCallers(semantic, opened, resolved, header, { limit, depth, started, symbol, declaredAt, show })
-    : renderRefs(semantic, opened, resolved, header, { limit, started, symbol, declaredAt, kind, show });
+    ? renderCallers(semantic, opened, resolved, header, { ...o, limit, depth })
+    : renderRefs(semantic, opened, resolved, header, { ...o, limit, kind });
+}
+
+interface Common {
+  started: number;
+  symbol: string;
+  declaredAt: string;
+  show: Show;
+  scope: ScopeInfo | undefined;
+  /** -P or .ts-axi.json project selected the Project. */
+  explicit: boolean;
+  label: string;
+  name: string;
+  absFile: string;
+}
+
+const OUTSIDE_ROWS = 5;
+
+/**
+ * No References under an explicit Project: importers of the declaring file (or of a barrel
+ * re-exporting it) elsewhere in the workspace, from the syntactic importer index.
+ */
+function outsideImporters(opened: Opened, o: Common): { fields: Record<string, unknown>; help: string[] } {
+  if (!o.explicit) return { fields: {}, help: [] };
+  const workspace = detectWorkspace(opened.root);
+  if (!isMultiProject(workspace.kind)) return { fields: {}, help: [] };
+  const index = importerIndexFor(opened.index, workspace);
+  const closure = importerClosure(index, [o.absFile], REFS_HOPS);
+  const inProject = new Set(opened.index.files);
+  const barrels = new Set(closure.barrels);
+  const targets = [o.absFile, ...closure.barrels];
+  const needle = o.symbol.split(".").pop()!;
+  const rows = closure.importers
+    .filter((f) => !inProject.has(f) && !barrels.has(f) && (opened.index.text(f) ?? "").includes(needle))
+    .map((f) => {
+      const line = targets.flatMap((t) => index.importersOf(t)).find((i) => i.file === f)?.line ?? 1;
+      return { file: opened.index.rel(f), line };
+    })
+    .sort((a, b) => byDepthThenPath(a.file, b.file));
+  if (rows.length === 0) return { fields: {}, help: [] };
+  return {
+    fields: {
+      found_outside_project: rows.slice(0, OUTSIDE_ROWS),
+      ...(rows.length > OUTSIDE_ROWS ? { found_outside_total: rows.length } : {}),
+      hint: `${rows.length} files outside the selected project import it - run without -P for workspace scope`,
+    },
+    help: [`Run \`ts-axi ${o.name} ${o.label}\` without -P to search the whole workspace`],
+  };
 }
 
 interface Row {
@@ -230,7 +296,7 @@ function renderRefs(
   opened: Opened,
   resolved: Resolved,
   header: Record<string, unknown>,
-  o: { limit: number; started: number; symbol: string; declaredAt: string; kind: Kind; show: Show },
+  o: Common & { limit: number; kind: Kind },
 ): string {
   const split = semantic.referenceSplit(resolved.absFile, resolved.pos);
   const rows = sortRows([...split.direct]);
@@ -250,8 +316,11 @@ function renderRefs(
   }
   if (via.length > 0 && !o.show.via) help.push(`Run \`ts-axi refs ${o.declaredAt} --via\` for the ${via.length} via References (${viaNames(via)})`);
   if (impls.length > 0 && !o.show.implementations) help.push(`Run \`ts-axi refs ${o.declaredAt} --implementations\` to list the ${impls.length} implementations`);
+  const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
+  help.unshift(...outside.help);
   if (isFunctionLike(o.kind)) help.push(`Run \`ts-axi callers ${o.declaredAt}\` for call sites with their enclosing function`);
   help.push(`Run \`ts-axi def ${o.declaredAt}\` for the declaration body`);
+  help.push(...scopeHelp(o.scope));
   return out(
     block({
       ...header,
@@ -273,6 +342,8 @@ function renderRefs(
             })),
           }),
       ...(truncated ? { truncated: true } : {}),
+      ...outside.fields,
+      ...scopeFields(o.scope),
       ...footer(semantic, o.started, fileList),
     }),
     helpBlock(help),
@@ -316,12 +387,12 @@ function renderCallers(
   opened: Opened,
   resolved: Resolved,
   header: Record<string, unknown>,
-  o: { limit: number; depth: number; started: number; symbol: string; declaredAt: string; show: Show },
+  o: Common & { limit: number; depth: number },
 ): string {
   const sites = semantic.incomingCalls(resolved.absFile, resolved.pos);
   if (sites === undefined) {
     return out(
-      block({ ...header, refs_total: 0, note: "not callable - no call hierarchy for this Symbol", ...footer(semantic, o.started, []) }),
+      block({ ...header, refs_total: 0, note: "not callable - no call hierarchy for this Symbol", ...scopeFields(o.scope), ...footer(semantic, o.started, []) }),
       helpBlock([`Run \`ts-axi refs ${o.declaredAt}\` for every Reference`]),
     );
   }
@@ -350,7 +421,10 @@ function renderCallers(
   if (via.length > 0 && !o.show.via) help.push(`Run \`ts-axi callers ${o.declaredAt} --via\` for the ${via.length} via calls (${viaNames(via)})`);
   const top = shown.find((r) => r.caller !== "(top-level)");
   if (top && o.depth === 1) help.push(`Run \`ts-axi callers ${o.declaredAt} --depth 2\` for who calls the callers`);
+  const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
+  help.unshift(...outside.help);
   help.push(`Run \`ts-axi refs ${o.declaredAt}\` for every Reference (not only calls)`);
+  help.push(...scopeHelp(o.scope));
   return out(
     block({
       ...header,
@@ -371,6 +445,8 @@ function renderCallers(
           }),
       ...(truncated ? { truncated: true } : {}),
       ...levels,
+      ...outside.fields,
+      ...scopeFields(o.scope),
       ...footer(semantic, o.started, fileList),
     }),
     helpBlock(help),

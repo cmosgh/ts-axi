@@ -1,0 +1,15 @@
+{
+  // Shared options; every project extends this file.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": [],
+    "paths": {
+      "@acme/shared": ["./libs/shared/src/index.ts"]
+    }
+  }
+}

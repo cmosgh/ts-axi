@@ -1,6 +1,6 @@
 import { bool, expectPositionals, flag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
-import { createSemanticProject } from "../project.js";
+import { semanticFor } from "../scope.js";
 import { block, fenced, helpBlock, out } from "../render.js";
 import { isFunctionLike, kindFromScriptElement, parseTarget, type Declaration, type SymbolGroup } from "../symbols.js";
 import {
@@ -89,7 +89,7 @@ export async function defCommand(args: string[], ctx: CommandContext): Promise<s
       );
     }
     // A reference, not a Declaration: ask the checker where it is declared.
-    const semantic = createSemanticProject(opened.index);
+    const { semantic } = semanticFor(opened, [at.abs], 0);
     const def = semantic.definitionAt(at.abs, at.pos);
     const decl = def && def.line > 0 ? declarationAt(opened.index, def.absFile, def.pos, kindFromScriptElement(def.kind)) : undefined;
     if (!decl) {

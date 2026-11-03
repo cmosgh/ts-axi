@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { decode } from "@toon-format/toon";
 import { beforeAll, describe, expect, it } from "vitest";
 import { main } from "../src/cli.js";
-import { FIXTURE, fixtureCopy, runner, type RunResult } from "./helpers.js";
+import { FIXTURE, fixtureCopy, runner, WORKSPACE_FIXTURE, type RunResult } from "./helpers.js";
 
 type Payload = Record<string, unknown>;
 
@@ -295,11 +295,14 @@ describe("interface and base members", () => {
     mkdirSync(join(dir, "packages", "other"), { recursive: true });
     writeFileSync(join(dir, "packages", "other", "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [] }, include: ["*.ts"] }));
     writeFileSync(join(dir, "packages", "other", "tool.ts"), "export const tool = 1;\n");
+    // A deeper copy (a stale checkout) sorts after the canonical file.
+    mkdirSync(join(dir, "a", "copy", "src", "models"), { recursive: true });
+    writeFileSync(join(dir, "a", "copy", "src", "models", "user.ts"), "export class User {\n  save(): void {}\n}\n");
     const { stdout } = await runner(dir)("refs", "User.save", "-P", "packages/other/tsconfig.json");
     const data = toon(stdout);
     expect(data).toMatchObject({
       matches: 0,
-      found_outside_project: [{ file: "src/models/user.ts", line: 13 }],
+      found_outside_project: [{ file: "src/models/user.ts", line: 13 }, { file: "a/copy/src/models/user.ts", line: 2 }],
       hint: "symbol is declared outside the selected project - run with -P tsconfig.json or without -P",
     });
     expect(stdout).not.toContain("--fuzzy");
@@ -593,5 +596,106 @@ describe("impact", () => {
 
   it("rejects --staged with a range", async () => {
     expect((await repo().run("impact", "HEAD", "--staged")).exitCode).toBe(2);
+  });
+});
+
+describe("workspace (Nx + pnpm fixture)", () => {
+  const git = (dir: string, ...args: string[]): string =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" });
+
+  function workspace() {
+    const dir = fixtureCopy({ fixture: WORKSPACE_FIXTURE });
+    git(dir, "symbolic-ref", "HEAD", "refs/heads/main");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    return {
+      dir,
+      run: runner(dir),
+      edit(rel: string, from: string, to: string) {
+        const text = readFileSync(join(dir, rel), "utf8");
+        expect(text).toContain(from);
+        writeFileSync(join(dir, rel), text.replace(from, to));
+      },
+    };
+  }
+  const files = (data: Payload, key = "refs") => [...new Set((data[key] as Payload[]).map((r) => r["file"]))].sort();
+  const SCOPE = /^nx workspace - \d+ of 7 files \(seeds 1; importers \d+\)$/;
+
+  let ws: ReturnType<typeof workspace>;
+  beforeAll(() => {
+    ws = workspace();
+  });
+
+  it("home view names the workspace kind and its projects", async () => {
+    const data = toon((await ws.run()).stdout);
+    expect(data).toMatchObject({ workspace: "nx (4 projects)", tsconfig: "nearest per file - workspace scope", source_files: 7 });
+  });
+
+  it("refs without -P finds uses in every project through the alias and the barrel", async () => {
+    const data = toon((await ws.run("refs", "formatMoney")).stdout);
+    expect(data).toMatchObject({ declared_at: "libs/shared/src/lib/money.ts:6", tests: 1, files: 4 });
+    expect(data["warning"]).toBeUndefined();
+    expect(data["scope"]).toMatch(SCOPE);
+    expect(files(data)).toEqual([
+      "apps/web/src/main.ts",
+      "services/billing/src/invoice.spec.ts",
+      "services/billing/src/invoice.ts",
+      "services/reports/src/summary.ts",
+    ]);
+    expect((data["refs"] as Payload[]).find((r) => r["file"] === "services/reports/src/summary.ts" && r["line"] === 3)).toBeDefined();
+  });
+
+  it("callers excludes the type-only use", async () => {
+    const data = toon((await ws.run("callers", "formatMoney")).stdout);
+    expect(files(data)).toEqual(["apps/web/src/main.ts", "services/billing/src/invoice.spec.ts", "services/billing/src/invoice.ts"]);
+    expect(data["scope"]).toMatch(SCOPE);
+  });
+
+  it("callers under -P of the lib config is empty and points at the importers outside it", async () => {
+    const { stdout } = await ws.run("callers", "formatMoney", "-P", "libs/shared/tsconfig.lib.json");
+    const data = toon(stdout);
+    expect(data["refs_total"]).toBe(0);
+    expect(data["scope"]).toBeUndefined();
+    expect(files(data, "found_outside_project")).toEqual(["apps/web/src/main.ts", "services/billing/src/invoice.spec.ts", "services/billing/src/invoice.ts", "services/reports/src/summary.ts"]);
+    expect(data["hint"]).toBe("4 files outside the selected project import it - run without -P for workspace scope");
+    expect(stdout).toContain("Run `ts-axi callers formatMoney` without -P");
+  });
+
+  it("a references-only tsconfig under -P expands to its lib and spec configs", async () => {
+    const shell = toon((await ws.run("refs", "roundCents", "-P", "libs/shared/tsconfig.json")).stdout);
+    expect(shell).toMatchObject({ tsconfig: "libs/shared/tsconfig.json (2 referenced configs)", refs_total: 2, tests: 1 });
+    expect(files(shell)).toEqual(["libs/shared/src/lib/money.spec.ts"]);
+    const lib = toon((await ws.run("refs", "roundCents", "-P", "libs/shared/tsconfig.lib.json")).stdout);
+    expect(lib["refs_total"]).toBe(0);
+    expect(lib["tsconfig"]).toBeUndefined();
+  });
+
+  it("impact -P on the references shell analyses the spec file instead of skipping it", async () => {
+    const r = workspace();
+    r.edit("libs/shared/src/lib/money.spec.ts", "roundCents(1.5) === 2", "roundCents(2.5) === 3");
+    const data = toon((await r.run("impact", "-P", "libs/shared/tsconfig.json")).stdout);
+    expect(data["skipped"]).toBeUndefined();
+    expect(data["tsconfig"]).toBe("libs/shared/tsconfig.json (2 referenced configs)");
+  });
+
+  it("impact of a body edit lists References across both services and the app", async () => {
+    const r = workspace();
+    r.edit("libs/shared/src/lib/money.ts", "money.cents / 100", "Math.trunc(money.cents) / 100");
+    const data = toon((await r.run("impact")).stdout);
+    expect(data["changed"]).toEqual([
+      expect.objectContaining({ symbol: "formatMoney", change: "body", exported: true, files: 4, tests: 1 }),
+    ]);
+    expect(files(data)).toEqual(["apps/web/src/main.ts", "services/billing/src/invoice.spec.ts", "services/billing/src/invoice.ts", "services/reports/src/summary.ts"]);
+    expect(data["scope"]).toMatch(/^nx workspace - \d+ of 7 files \(seeds 1; importers \d+\)$/);
+  });
+
+  it("impact of a signature change lists the type-only use as a ref; callers does not", async () => {
+    const r = workspace();
+    r.edit("libs/shared/src/lib/money.ts", "formatMoney(money: Money)", "formatMoney(money: Money, locale = 'en')");
+    const data = toon((await r.run("impact")).stdout);
+    expect((data["changed"] as Payload[])[0]).toMatchObject({ symbol: "formatMoney", change: "signature" });
+    expect(files(data)).toContain("services/reports/src/summary.ts");
+    const callers = toon((await r.run("callers", "formatMoney")).stdout);
+    expect(files(callers)).not.toContain("services/reports/src/summary.ts");
   });
 });

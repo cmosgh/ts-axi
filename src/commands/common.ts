@@ -8,6 +8,7 @@ import { usageError } from "../errors.js";
 import { hasGlobMagic, matchesGlob } from "../glob.js";
 import { openProject, type ProjectContext, type SyntacticIndex } from "../project.js";
 import { loadSettings, type Settings } from "../settings.js";
+import { byDepthThenPath } from "../walk.js";
 import {
   clip,
   didYouMean,
@@ -108,7 +109,17 @@ export function resolveNameTarget(
     ...(target.member !== undefined ? { member: target.member } : {}),
     fuzzy: f.fuzzy,
   });
-  return groupSymbols(applyFilters(ctx, found, f));
+  // Shallowest path first: the canonical copy before nested duplicates.
+  return groupSymbols(applyFilters(ctx, found, f)).sort(
+    (a, b) => byDepthThenPath(a.primary.file, b.primary.file) || a.decls[0]!.nameLine - b.decls[0]!.nameLine,
+  );
+}
+
+/** `tsconfig: x (n referenced configs)` when a references-only tsconfig was expanded. */
+export function projectFields(ctx: ProjectContext): Record<string, unknown> {
+  const { tsconfig, referenced } = ctx.index.project;
+  if (!tsconfig || referenced === undefined) return {};
+  return { tsconfig: `${relative(ctx.cwd, tsconfig).split(sep).join("/")} (${referenced} referenced configs)` };
 }
 
 export function suggestions(ctx: ProjectContext, target: Extract<Target, { kind: "name" }>): string[] {

@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./libs/shared" },
+    { "path": "./services/billing" },
+    { "path": "./services/reports" },
+    { "path": "./apps/web" }
+  ]
+}

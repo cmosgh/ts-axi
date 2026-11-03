@@ -7,14 +7,16 @@ import { main } from "../src/cli.js";
 
 /** The synthetic project, read-only. Run commands in a `fixtureCopy()` instead. */
 export const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "project");
+/** The synthetic Nx + pnpm workspace, read-only. */
+export const WORKSPACE_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "workspace");
 
 /**
  * A temp copy of the fixture as its own repo root, so paths print as
  * `src/...` and the enclosing repo's `**\/test/**` glob does not apply.
  */
-export function fixtureCopy(options: { tsconfig?: boolean } = {}): string {
+export function fixtureCopy(options: { tsconfig?: boolean; fixture?: string } = {}): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "ts-axi-fixture-")));
-  cpSync(FIXTURE, dir, {
+  cpSync(options.fixture ?? FIXTURE, dir, {
     recursive: true,
     filter: (src) => options.tsconfig !== false || !src.endsWith("tsconfig.json"),
   });
