@@ -24,7 +24,7 @@ import {
 
 export const DEF_HELP = `usage: ts-axi def <name | Class.member | path:line[:col]> [flags]
 flags[7]:
-  --kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace>, --in <dir|glob> (repeatable; restrict to files), --exported, --fuzzy (substring, case-insensitive), --full (whole body; default first ${BODY_LINES} lines), -P <tsconfig>, --json
+  --kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state>, --in <dir|glob> (repeatable; restrict to files), --exported, --fuzzy (substring, case-insensitive), --full (whole body; default first ${BODY_LINES} lines), -P <tsconfig>, --json
 output:
   1 match = file, line, kind, exported, signature + body fenced with file line numbers
   several = matches[n]{file,line,kind,exported,signature} (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms (--in, --kind, Class.member, --exported) with how many each keeps

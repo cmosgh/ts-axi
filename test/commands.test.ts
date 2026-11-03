@@ -618,14 +618,49 @@ describe("impact", () => {
       const data = await impact(r);
       expect(data["warning"]).toContain("implicit project");
       expect(data).not.toHaveProperty("file_level");
-      expect(data["local_only"]).toBe("1 (CartCtrl body)");
-      expect(changed(data)).toEqual([expect.objectContaining({ symbol: "pad", kind: "function", change: "body", exported: false, at: "lib/format.js:2", refs_outside: 2 })]);
+      // CartCtrl is named by ng-controller in a template: not local.
+      expect(changed(data)).toEqual([
+        expect.objectContaining({ symbol: "pad", kind: "function", change: "body", exported: false, at: "lib/format.js:2", refs_outside: 2, templates: "-" }),
+        expect.objectContaining({ symbol: "CartCtrl", change: "body", refs_outside: 0, templates: 1 }),
+      ]);
     });
 
     it("a DI array or parameter change of a registration is a signature change", async () => {
       const r = repo(LEGACY_FIXTURE);
       r.edit("client/app.js", '["$scope", "priceService", function ($scope, priceService)', '["$scope", "taxService", function ($scope, priceService)');
-      expect((await impact(r))["local_only"]).toBe("1 (CartCtrl signature)");
+      expect(changed(await impact(r))).toEqual([expect.objectContaining({ symbol: "CartCtrl", change: "signature", templates: 1 })]);
+    });
+
+    it("an edit inside a ui-router resolve callback names the callback, not file_level", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/states.js", "return response.data;", "return response.data || [];");
+      const data = await impact(r);
+      expect(data).not.toHaveProperty("file_level");
+      const symbols = [...((data["changed"] as Rows | undefined) ?? []).map((c) => `${c["symbol"]} ${c["change"]}`), String(data["local_only"] ?? "")];
+      expect(symbols.join(" | ")).toContain("states.cart.resolve.items body");
+    });
+
+    it("a state hook edit is local - the router calls it, not a name", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/states.js", "window.scrollTo(0, 0);", "window.scrollTo(0, 10);");
+      expect((await impact(r))["local_only"]).toBe("1 (states.checkout.onEnter body)");
+    });
+
+    it("a directive binding change shows template usages; a changed template using it is a template_change", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/directives.js", 'fallbackDisplayProperty: "=",', 'fallbackDisplayProperty: "<",');
+      const alone = await impact(r);
+      expect(changed(alone)).toEqual([
+        expect.objectContaining({ symbol: "wapSelect.fallbackDisplayProperty", kind: "property", change: "signature", templates: 1, tests: 0 }),
+      ]);
+      expect(alone).not.toHaveProperty("template_changes");
+      r.edit("client/templates/cart.html", 'fallback-display-property="title"', 'fallback-display-property="label"');
+      r.edit("client/templates/empty.html", "Nothing here", "Nothing yet");
+      const both = await impact(r);
+      expect(both["template_changes"]).toEqual([{ file: "client/templates/cart.html", symbols: "wapSelect.fallbackDisplayProperty" }]);
+      expect(both["skipped"]).toEqual([{ file: "client/templates/empty.html", reason: "not TS or JS source" }]);
+      const grep = await impact(r, "--grep");
+      expect(grep["unresolved"]).toEqual(expect.arrayContaining([expect.objectContaining({ file: "client/templates/cart.html", line: 2 })]));
     });
 
     it("an expando method body edit is never local_only - its textual matches are counted", async () => {
@@ -723,6 +758,47 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(plain["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi refs client/app.js:6 --grep")]));
     const grep = toon((await legacy("refs", "clearCart", "--grep")).stdout);
     expect(grep["unresolved"]).toEqual([{ file: "client/methods.js", line: 18, context: 'Meteor.call("clearCart", this._id);' }]);
+  });
+
+  it("outline lists ui-router states and their callbacks; directive bindings are properties", async () => {
+    expect(await names("client/states.js")).toEqual([
+      "1 function config",
+      "5 state states.cart",
+      "10 method states.cart.resolve.items",
+      "17 state states.checkout",
+      "22 method states.checkout.resolve.total",
+      "26 method states.checkout.onEnter",
+    ]);
+    const states = toon((await legacy("outline", "client/states.js")).stdout)["decls"] as Payload[];
+    expect(states[1]).toMatchObject({ kind: "state", signature: "state cart (url /cart)" });
+    expect(await names("client/directives.js")).toEqual([
+      "3 function wapSelect",
+      "7 property wapSelect.fallbackDisplayProperty",
+      "8 property wapSelect.items",
+      "15 variable priceTag",
+      "17 property priceTag.amount",
+      "19 method priceTag.controller",
+      "23 function money",
+    ]);
+    const def = await legacy("def", "states.cart", "--kind", "state");
+    expect(def.stdout).toContain("file: client/states.js\nline: 5\nkind: state");
+  });
+
+  it("refs on a directive counts its template usages; --grep lists them", async () => {
+    const plain = toon((await legacy("refs", "wapSelect")).stdout);
+    expect(plain).toMatchObject({ symbol: "wapSelect", templates: "1 usages in 1 files" });
+    expect(plain["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs client/directives.js:3 --grep` for the 1 template usages"]));
+    const grep = toon((await legacy("refs", "wapSelect", "--grep")).stdout);
+    expect(grep["unresolved"]).toEqual([
+      { file: "client/templates/cart.html", line: 2, context: '<wap-select fallback-display-property="title" items="cart.items"></wap-select>' },
+    ]);
+    const rows = async (target: string) =>
+      ((toon((await legacy("refs", target, "--grep")).stdout)["unresolved"] as Payload[]) ?? []).filter((u) => String(u["file"]).endsWith(".html")).map((u) => `${u["file"]}:${u["line"]}`);
+    expect(await rows("priceTag")).toEqual(["client/templates/cart.html:3"]);
+    expect(await rows("priceTag.amount")).toEqual(["client/templates/cart.html:3"]);
+    expect(await rows("money")).toEqual(["client/templates/cart.html:4"]);
+    expect(await rows("client/app.js:6")).toEqual(["client/templates/cart.html:1"]);
+    expect(toon((await legacy("refs", "wapSelect.items")).stdout)).toMatchObject({ templates: "1 usages in 1 files" });
   });
 
   it("refs on an IIFE helper goes through the LanguageService", async () => {

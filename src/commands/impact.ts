@@ -25,6 +25,7 @@ import { block, helpBlock, out } from "../render.js";
 import { isTestFile } from "../settings.js";
 import { isFunctionLike, type Declaration, type Kind } from "../symbols.js";
 import { IMPACT_HOPS, scopeFields, scopeHelp, semanticFor } from "../scope.js";
+import { isTemplatePath, loadTemplates, templateTarget, templateUsages, usagesIn, type TemplateFile, type TemplateTarget } from "../templates.js";
 import { walkFiles } from "../walk.js";
 import { contextOf, lineOf, open, projectFields, type Opened } from "./common.js";
 
@@ -50,6 +51,8 @@ output:
   notes[n]{symbol,note} = a signature change of a member that implements an interface or base member (the contract may break)
   local_only = Changes with no Reference outside the change set; file_level[n]{file,lines} = changed lines outside any Declaration
   blind_spots[n]{symbol,file,line,reason} = uses the checker cannot follow (any; string keys; unresolved export *)
+  templates = column added only when a changed Symbol is one templates name (directive, component, binding, controller, filter): its usages in .html/.htm/.ejs/.hbs/.njk/.pug files; - for other rows; such a Change is never local_only
+  template_changes[n]{file,symbols} = templates in the diff that use a changed directive, binding, controller or filter - review them with that change
   skipped[n]{file,reason} = files in the diff that were not analysed (.astro, .json, outside the Project)
   tests: 0 on an exported signature or body change = no Test file references it
   scope = in a monorepo without -P the program is the touched files + two levels of importers (scope_partial: true when capped)
@@ -185,6 +188,9 @@ interface Row {
   textual?: TextualCount;
   /** Of those, lines holding no known position (what `--grep` lists for this name). */
   unresolved?: number;
+  /** Template form of the Symbol and its usages (directives, components, bindings, controllers, filters). */
+  template?: TemplateTarget;
+  templates?: Array<{ file: string; line: number; col: number }>;
 }
 
 /** Uses of a removed Symbol in the checkout: identifiers the checker can no longer resolve. */
@@ -315,8 +321,12 @@ export function textualMatches(
   return rows.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
-/** The checker may miss uses: JS declaring file, a string-registered name, or no tsconfig at all. */
+/**
+ * The checker may miss uses: JS declaring file, a string-registered name, or no tsconfig at all.
+ * A state's hooks (`onEnter`, inline `controller`) are called by the router, never by name: no textual count.
+ */
 export function isUntyped(opened: Opened, decl: Declaration | undefined, file: string | undefined): boolean {
+  if (decl?.parentName !== undefined && /^(states|routes)\./.test(decl.parentName) && !decl.parentName.endsWith(".resolve")) return false;
   return decl?.nameless === true || opened.index.project.implicit || (file !== undefined && /\.[mc]?jsx?$/.test(file));
 }
 
@@ -347,6 +357,22 @@ export function textualLine(count: TextualCount): string {
 
 export function textualHint(command: string, gap: number): string {
   return `Run \`${command}\` for the ${gap} textual matches the checker cannot resolve (untyped JavaScript)`;
+}
+
+/** `--grep` rows plus template usages of the templated rows, one per file:line. */
+function withTemplateRows(textRows: Unresolved[], rows: Row[], files: TemplateFile[]): Unresolved[] {
+  const texts = new Map(files.map((f) => [f.rel, f.text] as const));
+  const seen = new Set(textRows.map((u) => `${u.file}:${u.line}`));
+  const result = [...textRows];
+  for (const row of rows) {
+    for (const u of row.templates ?? []) {
+      const key = `${u.file}:${u.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({ file: u.file, line: u.line, context: contextOf(lineOf(texts.get(u.file), u.line), u.col) });
+    }
+  }
+  return result.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
 function siteKey(site: CallSite): string {
@@ -451,8 +477,11 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     ...input.missing.map((file) => ({ file, reason: "not in the working tree" })),
   ];
   const analysed: FileInput[] = [];
+  // Templates stay skipped unless they use a changed Symbol (then template_changes).
+  const templateInputs: FileInput[] = [];
   for (const file of input.files) {
     if (/\.d\.[mc]?ts$/.test(file.path)) skipped.push({ file: file.path, reason: "declaration file" });
+    else if (isTemplatePath(file.path)) templateInputs.push(file);
     else if (!isSourcePath(file.path)) skipped.push({ file: file.path, reason: "not TS or JS source" });
     else if (file.status !== "deleted" && !projectFiles.has(opened.index.abs(file.path))) skipped.push({ file: file.path, reason: "not in the Project" });
     else analysed.push(file);
@@ -487,9 +516,13 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     head: input.head,
     changes: total,
   };
-  const skippedBlock = skipped.length > 0 ? capped("skipped", skipped) : {};
+  const skipTemplates = (used: Set<string>): void => {
+    for (const f of templateInputs) if (!used.has(f.path)) skipped.push({ file: f.path, reason: "not TS or JS source" });
+  };
 
   if (declChanges.length === 0) {
+    skipTemplates(new Set());
+    const skippedBlock = skipped.length > 0 ? capped("skipped", skipped) : {};
     const help = total === 0
       ? [arg === undefined && !staged ? "Run `ts-axi impact main...HEAD` to analyse a branch against main" : "Run `ts-axi impact` for uncommitted changes"]
       : ["Changes touch imports or module-level statements only - read those lines directly"];
@@ -557,10 +590,34 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     row.textual = textualCount(opened, row.live.name, changeSet);
     if (row.textual.matches > 0) row.unresolved = textualMatches(opened, semantic, [row.live.name], known, new Set(), changeSet).length;
   }
+  // Template usages: directives, components, bindings, controllers and filters named in .html and friends.
+  let templateFiles: TemplateFile[] | undefined;
+  for (const row of rows) {
+    const decl = row.live ?? row.change.before!;
+    const fileDecls = [
+      ...opened.index.declarations(opened.index.abs(row.change.file)),
+      ...declChanges.filter((c) => c.file === row.change.file).flatMap((c) => (c.before ? [c.before] : [])),
+    ];
+    const target = templateTarget(decl, fileDecls);
+    if (!target) continue;
+    templateFiles ??= loadTemplates(opened.root);
+    row.template = target;
+    row.templates = templateUsages(templateFiles, target);
+  }
+  const templateChanges: Array<{ file: string; symbols: string }> = [];
+  for (const f of templateInputs) {
+    const text = f.afterText ?? f.beforeText;
+    if (typeof text !== "string") continue;
+    const symbols = [...new Set(rows.filter((r) => r.template && usagesIn(text, r.template).length > 0).map((r) => r.symbol))];
+    if (symbols.length > 0) templateChanges.push({ file: f.path, symbols: symbols.join("; ") });
+  }
+  skipTemplates(new Set(templateChanges.map((t) => t.file)));
+  const skippedBlock = skipped.length > 0 ? capped("skipped", skipped) : {};
+
   // Textual matches the checker did not resolve: such a Change is never local_only.
   const textualGap = (r: Row): number => (r.textual && r.textual.matches > r.outside.length ? r.unresolved ?? 0 : 0);
   const shownRefs = (r: Row): Array<ReferenceEntry & { via?: string }> => (showVia ? [...r.outside, ...r.via].sort(byPosition) : r.outside);
-  const hasOutside = (r: Row): boolean => r.outside.length > 0 || r.via.length > 0 || textualGap(r) > 0;
+  const hasOutside = (r: Row): boolean => r.outside.length > 0 || r.via.length > 0 || textualGap(r) > 0 || (r.templates?.length ?? 0) > 0;
 
   const listed = rows
     .filter(hasOutside)
@@ -602,9 +659,10 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     if (!names.has(name)) names.set(name, r.symbol);
   }
   const spots = blindSpots(semantic, names, changeSet);
-  const unresolved = grep
+  const textRows = grep
     ? textualMatches(opened, semantic, [...names.keys()], known, new Set(spots.map((s) => `${s.file}:${s.line}`)), changeSet)
     : [];
+  const unresolved = grep ? withTemplateRows(textRows, rows, templateFiles ?? []) : [];
 
   const touched = [...new Set([...analysed.filter((f) => f.status !== "deleted").map((f) => f.path), ...listed.flatMap((r) => r.outside.map((e) => e.file))])];
   const diagnostics = semantic.diagnosticsCount(touched);
@@ -629,6 +687,9 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   if (!showVia && listed.some((r) => r.via.length > 0)) {
     help.push(`Run \`${rerun(arg, parsed, "--via")}\` for References through an interface or base member - they may reach the changed code`);
   }
+  const templated = listed.filter((r) => (r.templates?.length ?? 0) > 0).sort((a, b) => b.templates!.length - a.templates!.length)[0];
+  if (templated && !grep) help.push(`Run \`ts-axi refs ${templated.at} --grep\` for the ${templated.templates!.length} template usages of ${templated.symbol}`);
+  if (templateChanges.length > 0) help.push("template_changes use a changed directive or binding - review each against that change");
   if (skipped.length > 0) help.push("Skipped files are not TS or JS source of the Project - review them by hand");
   const specHint = specFilesHint(ctx.cwd, opened, skipped, listed.every((r) => fileCounts(r).tests === 0));
   if (specHint) help.push(specHint);
@@ -652,6 +713,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
               refs_outside: r.outside.length,
               via: r.via.length,
               ...(gap > 0 ? { textual: r.textual ? r.textual.matches : "-" } : {}),
+              ...(rows.some((x) => x.template) ? { templates: r.templates ? r.templates.length : "-" } : {}),
               ...fileCounts(r),
             })),
             ...(refRows.length > 0 ? { refs: refRows } : {}),
@@ -661,6 +723,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       ...(notes.length > 0 ? { notes } : {}),
       ...(localOnly.length > 0 ? { local_only: localOnlyLine(localOnly.map((r) => `${r.symbol} ${r.change.change}`)) } : {}),
       ...(fileLevel.length > 0 ? { file_level: fileLevel } : {}),
+      ...(templateChanges.length > 0 ? capped("template_changes", templateChanges) : {}),
       ...capped("blind_spots", spots),
       ...(grep ? capped("unresolved", unresolved) : {}),
       ...depthLevels(semantic, rows, depth),

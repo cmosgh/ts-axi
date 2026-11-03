@@ -321,7 +321,9 @@ export function createSyntacticIndex(root: string, project: ParsedProject): Synt
       return list;
     },
     findDeclarations(query) {
-      const needle = query.fuzzy ? query.name.toLowerCase() : query.name;
+      // A nested holder (`states.cart`) may never be spelled in the file: prefilter on the member.
+      const word = query.member ?? query.name;
+      const needle = query.fuzzy ? word.toLowerCase() : word;
       const result: Declaration[] = [];
       for (const file of index.files) {
         const text = index.text(file);

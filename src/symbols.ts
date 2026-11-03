@@ -14,6 +14,7 @@ export const KINDS = [
   "enum",
   "enum-member",
   "namespace",
+  "state",
 ] as const;
 export type Kind = (typeof KINDS)[number];
 
@@ -271,6 +272,11 @@ function nameText(name: ts.Node | undefined, sf: ts.SourceFile): string | undefi
 const REGISTRATION_VERBS: ReadonlySet<string> = new Set(["controller", "service", "factory", "directive", "filter", "component", "run", "config", "provider"]);
 /** Verbs whose callback is a constructor: its `this.x = function` statements are members. */
 const CONSTRUCTOR_VERBS: ReadonlySet<string> = new Set(["controller", "service", "provider"]);
+/** Router providers whose `.state(...)` / `.when(...)` calls declare a state (ui-router, ngRoute). */
+const STATE_PROVIDER = /^\$?stateProvider$/i;
+const ROUTE_PROVIDER = /^\$?routeProvider$/i;
+/** Directive definition keys whose object literal lists the bindings. */
+const BINDING_KEYS: ReadonlySet<string> = new Set(["scope", "bindToController", "bindings"]);
 /** `Template.x.<hook>(fn)` lifecycle callbacks. */
 const TEMPLATE_HOOKS: ReadonlySet<string> = new Set(["onCreated", "onRendered", "onDestroyed"]);
 
@@ -440,6 +446,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     if (verb === "component" && arg && ts.isObjectLiteralExpression(arg)) {
       nested({ start, end: arg.end, kind: "variable", name, exported: true, signature: `component ${name}`, namePos: arg.getStart(sf), nameless: true });
       objectMembers(arg, name, true);
+      bindingMembers(arg, name);
       return;
     }
     const fn = registeredFunction(arg);
@@ -461,10 +468,110 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     if (inject) raws[raws.length - 1]!.signature += `\n${inject.trim()}`;
     if (CONSTRUCTOR_VERBS.has(verb)) thisMembers(fn.body, name, true);
     if (verb === "factory" || verb === "service") returnedMembers(fn.body, name);
+    if (verb === "directive") for (const obj of returnedObjects(fn.body)) bindingMembers(obj, name);
+    if (verb === "config" || verb === "run") routerBody(fn.body);
   };
+
+  /** Object literals a function returns at its top level (a directive definition object). */
+  const returnedObjects = (body: ts.ConciseBody): ts.ObjectLiteralExpression[] => {
+    const direct = unwrap(body as ts.Expression);
+    if (ts.isObjectLiteralExpression(direct)) return [direct];
+    if (!ts.isBlock(body)) return [];
+    return body.statements.flatMap((st) => (ts.isReturnStatement(st) && st.expression && ts.isObjectLiteralExpression(unwrap(st.expression)) ? [unwrap(st.expression) as ts.ObjectLiteralExpression] : []));
+  };
+
+  /** `scope: { x: '=' }` / `bindToController` / `bindings` keys as `property` Declarations `<owner>.x`. */
+  const bindingMembers = (obj: ts.ObjectLiteralExpression, owner: string): void => {
+    for (const prop of obj.properties) {
+      if (!ts.isPropertyAssignment(prop) || !BINDING_KEYS.has(nameText(prop.name, sf) ?? "")) continue;
+      const bindings = unwrap(prop.initializer);
+      if (!ts.isObjectLiteralExpression(bindings)) continue;
+      for (const b of bindings.properties) {
+        const name = nameText(b.name, sf);
+        if (!name || !b.name || !ts.isPropertyAssignment(b)) continue;
+        nested({ start: b.getStart(sf), end: b.end, kind: "property", name, parentName: owner, exported: true, signature: tokenText(b, sf, b.getStart(sf), b.end), namePos: b.name.getStart(sf) });
+      }
+    }
+  };
+
+  /** Function-valued properties of a state object (`resolve.x`, `onEnter`, `views.main.controller`) as methods; nested objects recurse. */
+  const stateMembers = (obj: ts.ObjectLiteralExpression, holder: string, depth: number): void => {
+    for (const prop of obj.properties) {
+      const name = nameText(prop.name, sf);
+      if (!name || !prop.name) continue;
+      if (ts.isMethodDeclaration(prop)) {
+        nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported: true, signature: fullSignatureOf(prop, sf), namePos: prop.name.getStart(sf) });
+      } else if (ts.isPropertyAssignment(prop)) {
+        const value = unwrap(prop.initializer);
+        const fn = registeredFunction(value);
+        if (fn) nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported: true, signature: `${name}${paramsText(fn, sf)}`, namePos: prop.name.getStart(sf) });
+        else if (ts.isObjectLiteralExpression(value) && depth < 3) stateMembers(value, `${holder}.${name}`, depth + 1);
+      }
+    }
+  };
+
+  /** One `.state('name', {...})`, `.state({ name, ... })` or `.when('/path', {...})` call. */
+  const stateCall = (call: ts.CallExpression, route: boolean): void => {
+    const [first, second] = call.arguments;
+    const obj = first && ts.isObjectLiteralExpression(first) && !route ? first : second && ts.isObjectLiteralExpression(second) ? second : undefined;
+    if (!obj) return;
+    const literal = (key: string): string | undefined => {
+      const prop = obj.properties.find((p) => ts.isPropertyAssignment(p) && nameText(p.name, sf) === key) as ts.PropertyAssignment | undefined;
+      return prop && isStringName(prop.initializer) ? prop.initializer.text : undefined;
+    };
+    const name = isStringName(first) ? first.text : literal("name");
+    if (name === undefined) return;
+    const url = literal("url");
+    const parent = route ? "routes" : "states";
+    // Plain-literal options are compared, not displayed: a new controller or template is a contract change.
+    const options = obj.properties
+      .filter((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && nameText(p.name, sf) !== "name" && nameText(p.name, sf) !== "url")
+      .filter((p) => isStringName(p.initializer) || p.initializer.kind === ts.SyntaxKind.TrueKeyword || p.initializer.kind === ts.SyntaxKind.FalseKeyword)
+      .map((p) => tokenText(p, sf, p.getStart(sf), p.end));
+    const callee = call.expression as ts.PropertyAccessExpression;
+    nested({
+      start: callee.name.getStart(sf),
+      end: call.end,
+      kind: "state",
+      name,
+      parentName: parent,
+      exported: true,
+      signature: `${route ? "route" : "state"} ${name}${url !== undefined && !route ? ` (url ${url})` : ""}${options.length > 0 ? `\n${options.join("; ")}` : ""}`,
+      namePos: obj.getStart(sf),
+      nameless: true,
+    });
+    stateMembers(obj, `${parent}.${name}`, 1);
+  };
+
+  /** `$stateProvider.state(...).state(...)` and `$routeProvider.when(...)` chains; `.otherwise()` ignored. */
+  const routerChain = (expr: ts.Expression): boolean => {
+    const calls: ts.CallExpression[] = [];
+    let e = unwrap(expr);
+    while (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression)) {
+      calls.push(e);
+      e = e.expression.expression;
+    }
+    if (!ts.isIdentifier(e)) return false;
+    const route = ROUTE_PROVIDER.test(e.text);
+    if (!route && !STATE_PROVIDER.test(e.text)) return false;
+    for (const call of calls.reverse()) {
+      const verb = (call.expression as ts.PropertyAccessExpression).name.text;
+      if (verb === (route ? "when" : "state")) stateCall(call, route);
+    }
+    return true;
+  };
+
+  /** Router chains at the top level of a `.config` / `.run` callback or of a function taking a router provider. */
+  const routerBody = (body: ts.ConciseBody | undefined): void => {
+    if (!body || !ts.isBlock(body)) return;
+    for (const statement of body.statements) if (ts.isExpressionStatement(statement)) routerChain(statement.expression);
+  };
+  const takesRouter = (fn: ts.SignatureDeclarationBase): boolean =>
+    fn.parameters.some((p) => ts.isIdentifier(p.name) && (STATE_PROVIDER.test(p.name.text) || ROUTE_PROVIDER.test(p.name.text)));
 
   /** Registrations along a call chain (`angular.module('x').controller(...).service(...)`), in source order. */
   const callChain = (expr: ts.Expression): void => {
+    if (routerChain(expr)) return;
     const calls: Array<{ call: ts.CallExpression; name: string }> = [];
     let e = unwrap(expr);
     while (ts.isCallExpression(e)) {
@@ -527,12 +634,14 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       if (!statement.name || !statement.body) return;
       if (inIife) add(statement, statement.name, statement.name.text, false);
       if (isConstructorName(statement.name.text)) thisMembers(statement.body, statement.name.text, inIife ? false : topLevelExported(statement.name.text));
+      if (takesRouter(statement)) routerBody(statement.body);
     } else if (ts.isVariableStatement(statement)) {
       for (const decl of statement.declarationList.declarations) {
         if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
         const name = decl.name.text;
         const fn = asFunction(decl.initializer);
         if (inIife && fn) add(decl, decl.name, name, false);
+        if (fn && takesRouter(fn)) routerBody(fn.body);
         const exported = inIife ? false : topLevelExported(name);
         const init = unwrap(decl.initializer);
         if (ts.isObjectLiteralExpression(init)) objectMembers(init, name, exported);

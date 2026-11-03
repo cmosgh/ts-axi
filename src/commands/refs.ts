@@ -7,6 +7,7 @@ import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProjec
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
 import { importerIndexFor, REFS_HOPS, scopeFields, scopeHelp, semanticFor, type ScopeInfo } from "../scope.js";
+import { loadTemplates, templatesLine, templateTarget, templateUsages } from "../templates.js";
 import { byDepthThenPath } from "../walk.js";
 import { detectWorkspace, isMultiProject } from "../workspace.js";
 import { isTestFile } from "../settings.js";
@@ -35,7 +36,7 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 const DEPTH_ROWS = 50;
 
-const SHARED_FLAGS = `--kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace> (narrows a name), --in <dir|glob> (repeatable; Declarations in these files), --exported, --fuzzy, --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} rows), --test-glob <glob> (repeatable; extra Test file pattern), --via (adds via rows with a via column), -P <tsconfig>, --json`;
+const SHARED_FLAGS = `--kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state> (narrows a name), --in <dir|glob> (repeatable; Declarations in these files), --exported, --fuzzy, --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} rows), --test-glob <glob> (repeatable; extra Test file pattern), --via (adds via rows with a via column), -P <tsconfig>, --json`;
 
 const VIA_DOC = `via_interface: n (Iface.member) = References through an interface or base member the Symbol implements or overrides - they MAY reach it; not in refs_total
   via_implementations: n (Impl.member) = References to implementations or overrides of the Symbol; not in refs_total
@@ -44,7 +45,8 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   refs_total: 0 under -P in a workspace lists found_outside_project[n]{file,line} = importers outside that Project
   scope = in a monorepo without -P the program is the declaring file + its importers (scope_partial: true when the importer scan was capped)
   tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references
-  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects); above refs_total = uses the checker cannot resolve - see refs --grep`;
+  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects); above refs_total = uses the checker cannot resolve - see refs --grep
+  templates: n usages in m files = template uses (.html .htm .ejs .hbs .njk .pug) of a directive or component (<wap-select / wap-select / data-wap-select), its bindings (fallback-display-property= on that tag), a controller (ng-controller) or a filter (| money); refs --grep lists them in unresolved`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
 flags[12]:
@@ -199,7 +201,9 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const explicit = Boolean(project || opened.settings.project);
   const declaredFile = decl?.file ?? (def && def.line > 0 ? def.file : undefined);
   const textual = declaredFile !== undefined && isUntyped(opened, decl, declaredFile) ? textualCount(opened, symbol.split(".").pop()!) : undefined;
-  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}), ...(textual ? { textual } : {}) };
+  const tplTarget = decl ? templateTarget(decl, opened.index.declarations(opened.index.abs(decl.file))) : undefined;
+  const templates = tplTarget ? templateRows(loadTemplates(opened.root), tplTarget) : undefined;
+  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}), ...(textual ? { textual } : {}), ...(templates ? { templates } : {}) };
 
   return mode === "calls"
     ? renderCallers(semantic, opened, resolved, header, { ...o, limit, depth })
@@ -220,6 +224,31 @@ interface Common {
   decl?: Declaration;
   /** Whole-word count of the name for untyped Symbols (see `isUntyped`). */
   textual?: TextualCount;
+  /** Template usages, for Symbols templates can name (directives, components, bindings, controllers, filters). */
+  templates?: Unresolved[];
+}
+
+/** Template usages as `--grep` rows. */
+export function templateRows(files: ReturnType<typeof loadTemplates>, target: NonNullable<ReturnType<typeof templateTarget>>): Unresolved[] {
+  const texts = new Map(files.map((f) => [f.rel, f.text] as const));
+  return templateUsages(files, target).map((u) => ({ file: u.file, line: u.line, context: contextOf(lineOf(texts.get(u.file), u.line), u.col) }));
+}
+
+/** `templates` field and the hint to list them. */
+function templateFields(o: Common, grepShown: boolean): { fields: Record<string, unknown>; help: string[] } {
+  if (!o.templates) return { fields: {}, help: [] };
+  const n = o.templates.length;
+  return {
+    fields: { templates: templatesLine(o.templates) },
+    help: n > 0 && !grepShown ? [`Run \`ts-axi refs ${o.declaredAt} --grep\` for the ${n} template usages`] : [],
+  };
+}
+
+/** Textual rows plus template rows, one per file:line, sorted. */
+function withTemplates(unresolved: Unresolved[], templates: Unresolved[] | undefined): Unresolved[] {
+  if (!templates || templates.length === 0) return unresolved;
+  const seen = new Set(unresolved.map((u) => `${u.file}:${u.line}`));
+  return [...unresolved, ...templates.filter((t) => !seen.has(`${t.file}:${t.line}`))].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
 const OUTSIDE_ROWS = 5;
@@ -361,10 +390,14 @@ function renderRefs(
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
   help.unshift(...outside.help);
   const word = o.symbol.split(".").pop()!;
-  const unresolved = o.show.grep || o.textual ? unresolvedOf(opened, semantic, o, [...rows, ...via, ...impls]) : [];
-  const text = textualFields(o, rows.length, unresolved.length, o.show.grep);
+  const unresolved = o.show.grep || o.textual || o.templates ? unresolvedOf(opened, semantic, o, [...rows, ...via, ...impls]) : [];
+  const grepRows = withTemplates(unresolved, o.templates);
+  // The --grep hint counts what --grep lists: textual and template rows together.
+  const text = textualFields(o, rows.length, grepRows.length, o.show.grep);
+  const tpl = templateFields(o, o.show.grep || text.help.length > 0);
   if (text.help.length > 0) help.unshift(...text.help);
-  else if (o.decl?.nameless && !o.show.grep) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
+  else if (o.decl?.nameless && !o.show.grep && tpl.help.length === 0) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
+  help.unshift(...tpl.help);
   if (isFunctionLike(o.kind)) help.push(`Run \`ts-axi callers ${o.declaredAt}\` for call sites with their enclosing function`);
   help.push(`Run \`ts-axi def ${o.declaredAt}\` for the declaration body`);
   help.push(...scopeHelp(o.scope));
@@ -374,6 +407,7 @@ function renderRefs(
       ...(o.decl?.nameless ? { note: NAMELESS_NOTE } : {}),
       refs_total: rows.length,
       ...text.fields,
+      ...tpl.fields,
       files,
       tests,
       ...viaFields(via, split.bases),
@@ -391,8 +425,8 @@ function renderRefs(
             })),
           }),
       ...(truncated ? { truncated: true } : {}),
-      ...(o.show.grep ? { unresolved: unresolved.length === 0 ? 0 : unresolved.slice(0, o.limit) } : {}),
-      ...(unresolved.length > o.limit ? { unresolved_total: unresolved.length } : {}),
+      ...(o.show.grep ? { unresolved: grepRows.length === 0 ? 0 : grepRows.slice(0, o.limit) } : {}),
+      ...(grepRows.length > o.limit ? { unresolved_total: grepRows.length } : {}),
       ...outside.fields,
       ...scopeFields(o.scope),
       ...footer(semantic, o.started, fileList),
@@ -447,9 +481,12 @@ function renderCallers(
         const split = semantic.referenceSplit(resolved.absFile, resolved.pos);
         const known = [...split.direct, ...split.declarations, ...split.via, ...split.implementations, ...split.dropped, ...(sites ?? [])];
         const calls = (sites ?? []).filter((s) => s.via === undefined).length;
-        return textualFields(o, calls, unresolvedOf(opened, semantic, o, known).length, false);
+        return textualFields(o, calls, withTemplates(unresolvedOf(opened, semantic, o, known), o.templates).length, false);
       })()
     : { fields: {}, help: [] };
+  const tpl = templateFields(o, callerText.help.length > 0);
+  callerText.fields = { ...callerText.fields, ...tpl.fields };
+  callerText.help = [...tpl.help, ...callerText.help];
   if (sites === undefined) {
     return out(
       block({ ...header, refs_total: 0, ...callerText.fields, note: "not callable - no call hierarchy for this Symbol", ...scopeFields(o.scope), ...footer(semantic, o.started, []) }),

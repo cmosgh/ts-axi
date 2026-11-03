@@ -16,6 +16,7 @@ flags[3]:
 output:
   one file = file + decls[n]{line,kind,name,exported,signature}; several = decls[n]{file,line,kind,name,exported,signature}
   class members follow their class as Class.member; at most ${MAX_ROWS} rows
+  kind state = a ui-router / ngRoute state as states.<name> (routes.<path>); its callbacks follow as states.<name>.resolve.<key> / states.<name>.onEnter
 examples[3]:
   ts-axi outline src/models/user.ts
   ts-axi outline src/models/user.ts --exported

@@ -1,0 +1,5 @@
+<div ng-controller="CartCtrl as cart">
+  <wap-select fallback-display-property="title" items="cart.items"></wap-select>
+  <span data-price-tag amount="cart.total()"></span>
+  <p>{{ cart.total() | money }}</p>
+</div>

@@ -8,7 +8,15 @@ A named thing in the analysed code that has an identity beyond its spelling: two
 
 ## Declaration
 
-The place where a Symbol is introduced, plus its **kind**: `function`, `class`, `method`, `property`, `variable`, `interface`, `type`, `enum`, `enum-member`, `namespace`. A Symbol can have several Declarations (overloads, interface merging). A Declaration is **exported** when another file can import it. A **nested declaration** is one of a bounded set of script-style patterns found below the top level: a string-registered callback (`.controller('Name', fn)`, qualified `Name`), a method of an object literal handed to a known holder (`methods.a`, `Template.x.helpers.a`, `exports.a`, `api.a` for `const api = {...}`), a prototype or static assignment (`Foo.bar`), a `this.x = function` in a constructor (`Foo.x`), or a function at the top level of an IIFE (`helper`, not exported); string-registered ones are **nameless** (no identifier, References are textual).
+The place where a Symbol is introduced, plus its **kind**: `function`, `class`, `method`, `property`, `variable`, `interface`, `type`, `enum`, `enum-member`, `namespace`, `state`. A Symbol can have several Declarations (overloads, interface merging). A Declaration is **exported** when another file can import it. A **nested declaration** is one of a bounded set of script-style patterns found below the top level: a string-registered callback (`.controller('Name', fn)`, qualified `Name`), a method of an object literal handed to a known holder (`methods.a`, `Template.x.helpers.a`, `exports.a`, `api.a` for `const api = {...}`), a prototype or static assignment (`Foo.bar`), a `this.x = function` in a constructor (`Foo.x`), or a function at the top level of an IIFE (`helper`, not exported), a directive's or component's binding (`wapSelect.items`), or a State and its callbacks; string-registered ones are **nameless** (no identifier, References are textual).
+
+## State
+
+A route of a client-side router, registered by name in a router configuration (`$stateProvider.state('cart', {...})`, `$routeProvider.when('/cart', {...})`). Qualified `states.cart` (`routes./cart`); the functions in its definition (`resolve` entries, `onEnter`, an inline controller) are its members, `states.cart.resolve.items`. Nameless.
+
+## Template usage
+
+A place in a template file (`.html`, `.htm`, `.ejs`, `.hbs`, `.njk`, `.pug`) that names a Declaration in the template's own spelling: a directive or component as a kebab-case element or attribute (`<wap-select`, `data-wap-select`), one of its bindings as an attribute on that tag (`fallback-display-property=`), a controller in `ng-controller`, a filter after `|`. Textual, counted apart from References and Test files.
 
 ## Signature
 

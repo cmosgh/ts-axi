@@ -38,6 +38,7 @@ import { parseSource } from "../src/project.js";
 import { collectDeclarations } from "../src/symbols.js";
 import { matchRows, MATCH_ROWS, narrowHints } from "../src/commands/common.js";
 import { groupSymbols } from "../src/symbols.js";
+import { kebab, templateTarget, usagesIn } from "../src/templates.js";
 
 let dir: string;
 beforeEach(() => {
@@ -636,6 +637,38 @@ describe("nested declarations", () => {
     expect(decls(text)).toEqual(["function helper", "function fmt", "function other"]);
   });
 
+  it("router states: chained .state() forms, ngRoute .when(), a provider-taking function; otherwise() ignored", () => {
+    const text = [
+      "function routes($stateProvider, $urlRouterProvider) {",
+      "  $urlRouterProvider.otherwise('/');",
+      "  $stateProvider.state('a', { url: '/a', views: { main: { controller: function () {} } } }).state({ name: 'b', onEnter() {} });",
+      "}",
+      "angular.module('m').config(function ($routeProvider) {",
+      "  $routeProvider.when('/c', { templateUrl: 'c.html', resolve: { d: ['svc', function (svc) {}] } });",
+      "});",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual([
+      "function routes",
+      "state states.a exported nameless",
+      "method states.a.views.main.controller exported",
+      "state states.b exported nameless",
+      "method states.b.onEnter exported",
+      "function config exported nameless",
+      "state routes./c exported nameless",
+      "method routes./c.resolve.d exported",
+    ]);
+    const all = collectDeclarations(parseSource("src/a.js", text), "src/a.js");
+    expect(all.find((d) => d.qualifiedName === "states.a")).toMatchObject({ kind: "state", name: "a", signature: "state a (url /a)" });
+    // Plain-literal options are compared, not displayed.
+    expect(all.find((d) => d.qualifiedName === "routes./c")?.fullSignature).toBe("route /c\ntemplateUrl: 'c.html'");
+  });
+
+  it("directive scope and component bindings are property members", () => {
+    const text = "angular.module('m').directive('wapSelect', () => ({ scope: { a: '=' }, bindToController: { b: '@' } })).component('tag', { bindings: { c: '<' } });\n";
+    expect(decls(text)).toEqual(["function wapSelect exported nameless", "property wapSelect.a exported", "property wapSelect.b exported", "variable tag exported nameless", "property tag.c exported"]);
+  });
+
   it("changed lines map to the nested Declaration, not the enclosing IIFE variable", () => {
     const text = "var api = (function () {\n  function helper() {\n    return 1;\n  }\n  return { helper: helper };\n})();\n";
     const all = collectDeclarations(parseSource("src/a.js", text), "src/a.js");
@@ -728,5 +761,36 @@ describe("classifyReferenceGroups", () => {
     expect(viaLine(7, ["A.parse", "A.parse"])).toBe("7 (A.parse)");
     expect(viaLine(2, ["A.parse", "B.parse"])).toBe("2 (A.parse; B.parse)");
     expect(viaLine(0, [])).toBe("0");
+  });
+});
+
+describe("template usages", () => {
+  const all = collectDeclarations(
+    parseSource("a.js", "angular.module('m').directive('wapSelect', function () { return { scope: { fallbackDisplayProperty: '=', items: '<' } }; }).controller('CartCtrl', function () {}).filter('money', function () {});\n"),
+    "a.js",
+  );
+  const target = (name: string) => templateTarget(all.find((d) => d.qualifiedName === name)!, all)!;
+  const lines = (text: string, name: string) => usagesIn(text, target(name)).map((u) => u.line);
+
+  it("kebab-cases camelCase names", () => {
+    expect(kebab("wapSelect")).toBe("wap-select");
+    expect(kebab("fallbackDisplayProperty")).toBe("fallback-display-property");
+    expect(kebab("HTMLView")).toBe("html-view");
+  });
+
+  it("matches elements and attributes once per line, not lookalikes", () => {
+    const html = ['<wap-select items="x"></wap-select>', '<div data-wap-select="y">', "<wap-selector>", "</wap-select>", "<p>wap-select-ish</p>", "<div x-wap-select>"].join("\n");
+    expect(lines(html, "wapSelect")).toEqual([1, 2, 6]);
+  });
+
+  it("a binding counts only on a tag carrying its directive", () => {
+    const html = ['<wap-select\n  fallback-display-property="a">', '<other fallback-display-property="b">', '<div wap-select items="c">'].join("\n");
+    expect(lines(html, "wapSelect.fallbackDisplayProperty")).toEqual([2]);
+    expect(lines(html, "wapSelect.items")).toEqual([4]);
+  });
+
+  it("controllers in ng-controller, filters after a single pipe", () => {
+    expect(lines('<div ng-controller="CartCtrl as c">\n<div data-ng-controller=\'CartCtrlX\'>', "CartCtrl")).toEqual([1]);
+    expect(lines("{{ a | money }}\n{{ a || money }}\n{{ a |money:2 }}", "money")).toEqual([1, 3]);
   });
 });
