@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { importerClosure } from "../importers.js";
-import { isPlainLocal, isUntyped, textualCount, textualHint, textualLine, textualMatches, type TextualCount, type Unresolved } from "./impact.js";
+import { isPlainLocal, isTextualCandidate, isUntyped, textualCount, textualNeedle, textualHint, textualLine, textualMatches, type TextualCount, type Unresolved } from "./impact.js";
 import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
@@ -45,7 +45,7 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   refs_total: 0 under -P in a workspace lists found_outside_project[n]{file,line} = importers outside that Project
   scope = in a monorepo without -P the program is the declaring file + its importers (scope_partial: true when the importer scan was capped)
   tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references
-  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects); 'n matches in this file' for a non-exported local; above refs_total = uses the checker cannot resolve - see refs --grep
+  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects; a state counts its full dotted name as a whole token, templates included; not for a state's resolve keys and hooks - injected by name, not imported); 'n matches in this file' for a non-exported local; above refs_total = uses the checker cannot resolve - see refs --grep
   templates: n usages in m files = template uses (.html .htm .ejs .hbs .njk .pug) of a directive or component (<wap-select / wap-select / data-wap-select), its bindings (fallback-display-property= on that tag), a controller (ng-controller) or a filter (| money); refs --grep lists them in unresolved`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
@@ -201,10 +201,11 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const explicit = Boolean(project || opened.settings.project);
   const declaredFile = decl?.file ?? (def && def.line > 0 ? def.file : undefined);
   const localFile = isPlainLocal(decl) ? opened.index.abs(decl.file) : undefined;
-  const textual = declaredFile !== undefined && isUntyped(opened, decl, declaredFile) ? textualCount(opened, symbol.split(".").pop()!, new Map(), localFile) : undefined;
+  const needle = textualNeedle(decl ?? symbol, kind);
+  const textual = declaredFile !== undefined && needle && isUntyped(opened, decl, declaredFile) ? textualCount(opened, needle, new Map(), localFile) : undefined;
   const tplTarget = decl ? templateTarget(decl, opened.index.declarations(opened.index.abs(decl.file))) : undefined;
   const templates = tplTarget ? templateRows(loadTemplates(opened.root), tplTarget) : undefined;
-  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}), ...(textual ? { textual } : {}), ...(templates ? { templates } : {}) };
+  const o = { started, symbol, kind, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}), ...(textual ? { textual } : {}), ...(templates ? { templates } : {}) };
 
   return mode === "calls"
     ? renderCallers(semantic, opened, resolved, header, { ...o, limit, depth })
@@ -222,6 +223,7 @@ interface Common {
   label: string;
   name: string;
   absFile: string;
+  kind: Kind;
   decl?: Declaration;
   /** Whole-word count of the name for untyped Symbols (see `isUntyped`). */
   textual?: TextualCount;
@@ -267,7 +269,8 @@ function outsideImporters(opened: Opened, o: Common): { fields: Record<string, u
   const inProject = new Set(opened.index.files);
   const barrels = new Set(closure.barrels);
   const targets = [o.absFile, ...closure.barrels];
-  const needle = o.symbol.split(".").pop()!;
+  const needle = textualNeedle(o.symbol, o.kind)?.text;
+  if (!needle) return { fields: {}, help: [] };
   const rows = closure.importers
     .filter((f) => !inProject.has(f) && !barrels.has(f) && (opened.index.text(f) ?? "").includes(needle))
     .map((f) => {
@@ -335,10 +338,12 @@ function viaFields(via: ViaRow[], bases: string[]): Record<string, unknown> {
 
 /** Whole-word matches of the name on lines that hold no known position (what `--grep` lists). */
 function unresolvedOf(opened: Opened, semantic: SemanticProject, o: Common, known: readonly Row[]): Unresolved[] {
+  const needle = isTextualCandidate(o.decl) ? textualNeedle(o.decl ?? o.symbol, o.kind) : undefined;
+  if (!needle) return [];
   return textualMatches(
     opened,
     semantic,
-    [o.symbol.split(".").pop()!],
+    [needle],
     new Set(known.map((r) => `${r.file}:${r.line}`)),
     new Set(o.decl ? [`${o.decl.file}:${o.decl.line}`, `${o.decl.file}:${o.decl.nameLine}`] : []),
     new Map(),
@@ -391,14 +396,14 @@ function renderRefs(
   if (impls.length > 0 && !o.show.implementations) help.push(`Run \`ts-axi refs ${o.declaredAt} --implementations\` to list the ${impls.length} implementations`);
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
   help.unshift(...outside.help);
-  const word = o.symbol.split(".").pop()!;
+  const word = textualNeedle(o.symbol, o.kind)?.text ?? "";
   const unresolved = o.show.grep || o.textual || o.templates ? unresolvedOf(opened, semantic, o, [...rows, ...via, ...impls]) : [];
   const grepRows = withTemplates(unresolved, o.templates);
   // The --grep hint counts what --grep lists: textual and template rows together.
   const text = textualFields(o, rows.length, grepRows.length, o.show.grep);
   const tpl = templateFields(o, o.show.grep || text.help.length > 0);
   if (text.help.length > 0) help.unshift(...text.help);
-  else if (o.decl?.nameless && !o.show.grep && tpl.help.length === 0) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
+  else if (o.decl?.nameless && word && !o.show.grep && tpl.help.length === 0) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
   help.unshift(...tpl.help);
   if (isFunctionLike(o.kind)) help.push(`Run \`ts-axi callers ${o.declaredAt}\` for call sites with their enclosing function`);
   help.push(`Run \`ts-axi def ${o.declaredAt}\` for the declaration body`);

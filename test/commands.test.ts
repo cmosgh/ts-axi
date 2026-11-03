@@ -654,6 +654,18 @@ describe("impact", () => {
       expect(all.join(" | ")).toContain("states.main.warehouse.outbound.outboundInit signature");
     });
 
+    it("a changed resolve key has no textual count and no blind spot from an unrelated .docks access", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      expect(readFileSync(join(r.dir, "client/app.js"), "utf8")).toContain("view.docks");
+      r.edit("client/outbound.states.js", "return res;", "return res.slice(0, 5);");
+      const data = await impact(r);
+      const row = "states.main.warehouse.outbound.outboundInit.resolve.docks body";
+      expect(String(data["local_only"])).toContain(row);
+      expect(JSON.stringify(data["changed"] ?? [])).not.toContain("resolve.docks");
+      expect(data).not.toHaveProperty("textual_only");
+      expect(JSON.stringify(data["blind_spots"] ?? [])).not.toContain("docks");
+    });
+
     it("a state hook edit is local - the router calls it, not a name", async () => {
       const r = repo(LEGACY_FIXTURE);
       r.edit("client/states.js", "window.scrollTo(0, 0);", "window.scrollTo(0, 10);");
@@ -743,7 +755,7 @@ describe("legacy JavaScript outline / def / refs", () => {
     ((toon((await legacy("outline", file)).stdout)["decls"] as Payload[]) ?? []).map((d) => `${d["line"]} ${d["kind"]} ${d["name"]}`);
 
   it("outline lists nested declarations with qualified names", async () => {
-    expect(await names("client/app.js")).toEqual(["6 function CartCtrl", "12 function priceService", "13 method priceService.sum", "17 function cartBadge"]);
+    expect(await names("client/app.js")).toEqual(["6 function CartCtrl", "12 function priceService", "13 method priceService.sum", "17 function cartBadge", "22 function dockCount"]);
     expect(await names("client/methods.js")).toEqual([
       "2 method methods.addItem",
       "5 method methods.clearCart",
@@ -841,6 +853,24 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(local).toMatchObject({ symbol: "pad", textual: "2 matches in this file" });
     const grep = toon((await legacy("refs", "lib/format.js:2", "--grep")).stdout);
     expect(((grep["unresolved"] as Payload[] | number | undefined) ?? 0)).toEqual(0);
+  });
+
+  it("refs on a state resolve key prints no textual line - the key is injected by name, not imported", async () => {
+    const out = (await legacy("refs", "client/outbound.states.js:9")).stdout;
+    expect(out).toContain("symbol: states.main.warehouse.outbound.outboundInit.resolve.docks");
+    expect(out).not.toContain("textual:");
+    expect(toon((await legacy("refs", "client/outbound.states.js:9", "--grep")).stdout)["unresolved"] ?? 0).toEqual(0);
+  });
+
+  it("a state's textual needle is its full dotted name, matched whole, templates included", async () => {
+    const data = toon((await legacy("refs", "client/outbound.states.js:21")).stdout);
+    expect(data["symbol"]).toBe("states.main.warehouse.outbound");
+    // The name const in outbound.states.js and the exact ui-sref in cart.html; the child state name and the bare word 'outbound' do not count.
+    expect(data["textual"]).toBe("2 matches in 2 files");
+    const grep = toon((await legacy("refs", "client/outbound.states.js:21", "--grep")).stdout)["unresolved"] as Payload[];
+    expect(grep.map((u) => `${u["file"]}:${u["line"]}`)).toEqual(["client/outbound.states.js:2", "client/templates/cart.html:11"]);
+    // Unresolved parts (`*`) leave no needle: no textual line.
+    expect((await legacy("refs", "client/outbound.states.js:15")).stdout).not.toContain("textual:");
   });
 
   it("refs on an IIFE helper goes through the LanguageService", async () => {

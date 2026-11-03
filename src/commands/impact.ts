@@ -296,7 +296,7 @@ export interface Unresolved {
 export function textualMatches(
   opened: Opened,
   semantic: SemanticProject,
-  names: string[],
+  names: Needle[],
   known: Set<string>,
   skipLines: Set<string>,
   changeSet: Map<string, Range[]>,
@@ -308,14 +308,14 @@ export function textualMatches(
   const rows: Unresolved[] = [];
   for (const abs of files) {
     const text = opened.index.text(abs);
-    if (text === undefined || !names.some((n) => text.includes(n))) continue;
+    if (text === undefined || !names.some((n) => text.includes(n.text))) continue;
     const rel = opened.index.rel(abs);
     // A Declaration of another Symbol with the same name is provably not a use.
     const declared = new Set(projectSet.has(abs) ? opened.index.declarations(abs).map((d) => d.nameLine) : []);
     const lines = new Set<number>();
-    for (const name of names) {
+    for (const { text: name, token } of names) {
       if (localTo.has(name) && localTo.get(name) !== abs) continue;
-      for (const m of wordMatches(text, name)) {
+      for (const m of wordMatches(text, name, token)) {
         if (known.has(`${rel}:${m.line}`) || skipLines.has(`${rel}:${m.line}`) || declared.has(m.line) || inRanges(changeSet.get(rel), m.line)) continue;
         if (lines.has(m.line)) continue;
         lines.add(m.line);
@@ -326,12 +326,39 @@ export function textualMatches(
   return rows.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
+/** Whether a whole-word count of the name says anything: not for router-called or by-name-injected members (`injected`). */
+export function isTextualCandidate(decl: Declaration | undefined): boolean {
+  return decl?.injected !== true;
+}
+
+/** What to search for: `token` = a dotted state name matched whole, else a bare identifier. */
+export interface Needle {
+  text: string;
+  token: boolean;
+}
+
 /**
- * The checker may miss uses: JS declaring file, a string-registered name, or no tsconfig at all.
- * A state's hooks (`onEnter`, inline `controller`) are called by the router, never by name: no textual count.
+ * The textual needle of a Symbol: a state's full name without the `states.`/`routes.` prefix (a token, so
+ * `ui-sref="a.b"` counts and `a.b.c` does not match `a.b`; none when it still holds `*`), else the last
+ * segment of the qualified name.
  */
+export function textualNeedle(subject: Declaration | string, kind?: string): Needle | undefined {
+  const symbol = typeof subject === "string" ? subject : subject.qualifiedName;
+  if ((kind ?? (typeof subject === "string" ? undefined : subject.kind)) === "state") {
+    const name = symbol.replace(/^(states|routes)\./, "");
+    return name.includes("*") || name === "" ? undefined : { text: name, token: true };
+  }
+  return { text: symbol.split(".").pop()!, token: false };
+}
+
+/** Whether `any`-typed property accesses of the name can be uses of the Symbol: same rule as `isTextualCandidate`. */
+export function isBlindSpotCandidate(decl: Declaration | undefined): boolean {
+  return decl?.injected !== true;
+}
+
+/** The checker may miss uses: JS declaring file, a string-registered name, or no tsconfig at all. */
 export function isUntyped(opened: Opened, decl: Declaration | undefined, file: string | undefined): boolean {
-  if (decl?.parentName !== undefined && /^(states|routes)\./.test(decl.parentName) && !decl.parentName.endsWith(".resolve")) return false;
+  if (!isTextualCandidate(decl)) return false;
   return decl?.nameless === true || opened.index.project.implicit || (file !== undefined && /\.[mc]?jsx?$/.test(file));
 }
 
@@ -351,15 +378,20 @@ export interface TextualCount {
  * Whole-word occurrences of `name` in Project files outside `changeSet`; lines declaring a `name` excluded.
  * With `onlyFile` (absolute), that file alone.
  */
-export function textualCount(opened: Opened, name: string, changeSet: Map<string, Range[]> = new Map(), onlyFile?: string): TextualCount {
+export function textualCount(opened: Opened, needle: Needle, changeSet: Map<string, Range[]> = new Map(), onlyFile?: string): TextualCount {
+  const { text: name, token } = needle;
   let matches = 0;
   let files = 0;
-  for (const abs of onlyFile !== undefined ? [onlyFile] : opened.index.files) {
+  const project = new Set(opened.index.files);
+  // State names are also written in templates (`ui-sref`), which the Project does not list.
+  const candidates = onlyFile !== undefined ? [onlyFile] : [...project];
+  if (token && onlyFile === undefined) walkExtra(opened.root, candidates);
+  for (const abs of new Set(candidates)) {
     const text = opened.index.text(abs);
     if (text === undefined || !text.includes(name)) continue;
     const rel = opened.index.rel(abs);
-    const declared = new Set(opened.index.declarations(abs).filter((d) => d.name === name).map((d) => d.nameLine));
-    const n = wordMatches(text, name).filter((m) => !declared.has(m.line) && !inRanges(changeSet.get(rel), m.line)).length;
+    const declared = new Set(project.has(abs) ? opened.index.declarations(abs).filter((d) => d.name === name).map((d) => d.nameLine) : []);
+    const n = wordMatches(text, name, token).filter((m) => !declared.has(m.line) && !inRanges(changeSet.get(rel), m.line)).length;
     matches += n;
     if (n > 0) files++;
   }
@@ -603,8 +635,10 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   for (const row of rows) {
     if (!row.live || !isUntyped(opened, row.live, row.live.file)) continue;
     const localTo = isPlainLocal(row.live) ? new Map([[row.live.name, opened.index.abs(row.live.file)]]) : undefined;
-    row.textual = textualCount(opened, row.live.name, changeSet, localTo?.get(row.live.name));
-    if (row.textual.matches > 0) row.unresolved = textualMatches(opened, semantic, [row.live.name], known, new Set(), changeSet, localTo).length;
+    const needle = textualNeedle(row.live);
+    if (!needle) continue;
+    row.textual = textualCount(opened, needle, changeSet, localTo?.get(row.live.name));
+    if (row.textual.matches > 0) row.unresolved = textualMatches(opened, semantic, [needle], known, new Set(), changeSet, localTo).length;
   }
   // Template usages: directives, components, bindings, controllers and filters named in .html and friends.
   let templateFiles: TemplateFile[] | undefined;
@@ -670,13 +704,17 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
 
   // --- Blind spots, textual matches, deeper callers ---
   const names = new Map<string, string>();
+  const textNames = new Map<string, Needle>();
   // A name is file-scoped only when every changed Declaration carrying it is a plain local of one file.
   const localTo = new Map<string, string>();
   const wide = new Set<string>();
   for (const r of rows) {
     const decl = r.change.after ?? r.change.before!;
     const name = decl.name;
-    if (!names.has(name)) names.set(name, r.symbol);
+    if (isBlindSpotCandidate(decl) && !names.has(name)) names.set(name, r.symbol);
+    const needle = isTextualCandidate(decl) ? textualNeedle(decl) : undefined;
+    if (!needle) continue;
+    if (!textNames.has(needle.text)) textNames.set(needle.text, needle);
     const abs = opened.index.abs(decl.file);
     if (!isPlainLocal(decl) || (localTo.has(name) && localTo.get(name) !== abs)) wide.add(name);
     else localTo.set(name, abs);
@@ -684,7 +722,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   for (const name of wide) localTo.delete(name);
   const spots = blindSpots(semantic, names, changeSet);
   const textRows = grep
-    ? textualMatches(opened, semantic, [...names.keys()], known, new Set(spots.map((s) => `${s.file}:${s.line}`)), changeSet, localTo)
+    ? textualMatches(opened, semantic, [...textNames.values()], known, new Set(spots.map((s) => `${s.file}:${s.line}`)), changeSet, localTo)
     : [];
   const unresolved = grep ? withTemplateRows(textRows, rows, templateFiles ?? []) : [];
 

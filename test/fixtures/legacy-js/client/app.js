@@ -17,4 +17,9 @@
     .directive("cartBadge", function () {
       return { restrict: "E", template: "<span>{{count}}</span>" };
     });
+
+  // An untyped access to a property that merely shares a name with a ui-router resolve key.
+  function dockCount(view) {
+    return view.docks.length;
+  }
 })();

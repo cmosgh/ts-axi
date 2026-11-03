@@ -42,6 +42,8 @@ export interface Declaration {
   fullSignature?: string;
   /** Registered by a string (`.controller('Name', fn)`): `namePos` is the function, not an identifier of the name. */
   nameless?: true;
+  /** Called by the framework or injected by name into its owner (a state's `resolve.x`, `onEnter`, `controller`): no project-wide textual count, no `any`-access blind spots. */
+  injected?: true;
 }
 
 export const SIGNATURE_MAX = 160;
@@ -350,6 +352,7 @@ interface Raw {
   namePos: number;
   hasBody: boolean;
   nameless?: true;
+  injected?: true;
 }
 
 /**
@@ -502,11 +505,11 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       const name = nameText(prop.name, sf);
       if (!name || !prop.name) continue;
       if (ts.isMethodDeclaration(prop)) {
-        nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported: true, signature: fullSignatureOf(prop, sf), namePos: prop.name.getStart(sf) });
+        nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported: true, signature: fullSignatureOf(prop, sf), namePos: prop.name.getStart(sf), injected: true });
       } else if (ts.isPropertyAssignment(prop)) {
         const value = unwrap(prop.initializer);
         const fn = registeredFunction(value);
-        if (fn) nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported: true, signature: `${name}${paramsText(fn, sf)}`, namePos: prop.name.getStart(sf) });
+        if (fn) nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported: true, signature: `${name}${paramsText(fn, sf)}`, namePos: prop.name.getStart(sf), injected: true });
         else if (ts.isObjectLiteralExpression(value) && depth < 3) stateMembers(value, `${holder}.${name}`, depth + 1);
       }
     }
@@ -810,6 +813,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       hasBody: r.hasBody,
       fullSignature: full,
       ...(r.nameless ? { nameless: true as const } : {}),
+      ...(r.injected ? { injected: true as const } : {}),
     };
   });
 }

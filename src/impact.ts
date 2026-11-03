@@ -263,10 +263,14 @@ export function localOnlyLine(entries: readonly string[], max = 10): string {
   return `${entries.length} (${[...shown, ...(rest > 0 ? [`+${rest}`] : [])].join("; ")})`;
 }
 
-/** Whole-word occurrences of `name` in `text`: 1-based line and column. */
-export function wordMatches(text: string, name: string): Array<{ line: number; col: number }> {
-  const escaped = name.replace(/[$]/g, "\\$");
-  const re = new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`, "g");
+/**
+ * Whole-word occurrences of `name` in `text`: 1-based line and column. With `token`, `name` is a dotted
+ * path (a state name): escaped literally, and neither `.` nor an identifier character may touch it.
+ */
+export function wordMatches(text: string, name: string, token = false): Array<{ line: number; col: number }> {
+  const re = token
+    ? new RegExp(`(?<![\\w$.])${name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(?![\\w$.])`, "g")
+    : new RegExp(`(?<![\\w$])${name.replace(/[$]/g, "\\$")}(?![\\w$])`, "g");
   const result: Array<{ line: number; col: number }> = [];
   const lines = text.split("\n");
   lines.forEach((lineText, i) => {
