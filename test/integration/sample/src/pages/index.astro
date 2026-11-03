@@ -1,0 +1,21 @@
+---
+import Counter from '../components/Counter';
+import CartSummary from '../components/CartSummary';
+import { formatDate } from '../lib/format';
+
+const today = formatDate(new Date());
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Lantern Coffee</title>
+  </head>
+  <body>
+    <h1>Lantern Coffee</h1>
+    <p>Small-batch roasts, open daily. Menu as of {today}.</p>
+    <Counter client:load />
+    <CartSummary client:load />
+  </body>
+</html>

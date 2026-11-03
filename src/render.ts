@@ -1,4 +1,4 @@
-import { encode } from "@toon-format/toon";
+import { decode, encode } from "@toon-format/toon";
 
 export type Obj = Record<string, unknown>;
 
@@ -7,14 +7,54 @@ export function block(value: Obj): string {
   return encode(value);
 }
 
+let jsonMode = false;
+
+/** Global `--json`: set once per run by `main()`; fenced text then becomes a string field. */
+export function setJsonMode(on: boolean): void {
+  jsonMode = on;
+}
+
+export function isJsonMode(): boolean {
+  return jsonMode;
+}
+
 /**
- * Render next-step suggestions one per line. `encode()` would inline a
- * primitive array as a single comma-joined (and quoted) line, which is harder
- * to read and costs more tokens once commands contain commas or quotes.
+ * Next-step suggestions, one list item per line. `encode()` would inline a
+ * primitive array as one comma-joined line; this keeps the payload decodable.
  */
 export function helpBlock(lines: readonly string[]): string {
   if (lines.length === 0) return "";
-  return `help[${lines.length}]:\n${lines.map((l) => `  ${l}`).join("\n")}`;
+  return `help[${lines.length}]:\n${lines.map((l) => `  - ${listItem(l)}`).join("\n")}`;
+}
+
+/** Quoted only when a decoder would read the bare line differently (`a: b`, `42`). */
+function listItem(line: string): string {
+  try {
+    if ((decode(`x[1]:\n  - ${line}`, { strict: true }) as { x: unknown[] }).x[0] === line) return line;
+  } catch {
+    // Falls through to quoting.
+  }
+  return JSON.stringify(line);
+}
+
+/**
+ * Raw text (source code) between `---` fences after `key:`. Under `--json` it
+ * is the string field `key`, so the whole payload still decodes.
+ */
+export function fenced(key: string, text: string): string {
+  const body = text.replace(/\s+$/, "");
+  return jsonMode ? encode({ [key]: body }) : `${key}:\n---\n${body}\n---`;
+}
+
+/** `--json` payload: the TOON output decoded; non-TOON text (help pages) becomes `{ text }`. */
+export function toJson(toon: string): string {
+  let value: unknown;
+  try {
+    value = decode(toon, { strict: true });
+  } catch {
+    value = { text: toon.trimEnd() };
+  }
+  return `${JSON.stringify(value, null, 2)}\n`;
 }
 
 /** Join blocks into one stdout payload, skipping empty ones. */

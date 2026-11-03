@@ -22,14 +22,21 @@ export interface ParsedArgs {
  * agent self-correct in one turn instead of scanning the generic flag list.
  */
 const RENAMED: Record<string, string> = {
-  "--base": "--dest",
-  "--destination": "--dest",
-  "--head": "--source",
-  "--message": "--body",
-  "--comment": "--body",
-  "--file": "--path",
-  "--repository": "--repo",
-  "--status": "--state",
+  "--project": "-P",
+  "--tsconfig": "-P",
+  "--type": "--kind",
+  "--exports": "--exported",
+  "--include": "--in",
+  "--path": "--in",
+  "--max": "--limit",
+  "--all": "--full",
+};
+
+/** Flags whose value is a positional argument in ts-axi. */
+const POSITIONAL: Record<string, string> = {
+  "--file": "pass the file as a positional argument",
+  "--symbol": "pass the symbol as a positional argument",
+  "--name": "pass the symbol as a positional argument",
 };
 
 /**
@@ -117,10 +124,14 @@ export function parseArgs(
     const renamed = unknown
       .filter((flag) => RENAMED[flag] && byName.has(RENAMED[flag]!))
       .map((flag) => `${flag} is not supported here; use ${RENAMED[flag]} instead`);
+    const positional = unknown
+      .filter((flag) => POSITIONAL[flag])
+      .map((flag) => `${flag} is not supported; ${POSITIONAL[flag]}`);
     throw usageError(
       `unknown flag${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")} for \`${command}\``,
       [
         ...renamed,
+        ...positional,
         `valid flags for \`${command}\`: ${valid} (--help always allowed)`,
       ],
     );
