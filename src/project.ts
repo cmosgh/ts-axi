@@ -93,6 +93,10 @@ export function walkSourceFiles(root: string): string[] {
   return listFiles(root, isSourceFile).files;
 }
 
+// `Bundler` resolves `require('..')` (directory `main`/`index.js`), ESM `./x.js` specifiers and
+// `"type": "module"` packages alike; NodeNext/Node10 gave the same References on CommonJS and ESM
+// samples. What breaks plain JavaScript is not the option set but `.d.ts` twins and
+// `module.exports = require()` shims, handled by `resolveModuleNameLiterals` in the host.
 export const IMPLICIT_COMPILER_OPTIONS: ts.CompilerOptions = {
   allowJs: true,
   checkJs: false,
@@ -425,6 +429,85 @@ export interface ProgramScope {
   currentDirectory: string;
 }
 
+const DECLARATION_TWINS: ReadonlyArray<[RegExp, ReadonlyArray<[string, ts.Extension]>]> = [
+  [/\.d\.ts$/, [[".js", ts.Extension.Js], [".jsx", ts.Extension.Jsx], [".mjs", ts.Extension.Mjs], [".cjs", ts.Extension.Cjs]]],
+  [/\.d\.mts$/, [[".mjs", ts.Extension.Mjs]]],
+  [/\.d\.cts$/, [[".cjs", ts.Extension.Cjs]]],
+];
+
+/** The implementation beside a `.d.ts` (`index.d.ts` → `index.js`) when it is a Project source file. */
+function implementationTwin(file: string, isSource: (abs: string) => boolean): { file: string; extension: ts.Extension } | undefined {
+  for (const [re, impls] of DECLARATION_TWINS) {
+    if (!re.test(file)) continue;
+    const base = file.replace(re, "");
+    for (const [ext, extension] of impls) if (isSource(base + ext)) return { file: base + ext, extension };
+  }
+  return undefined;
+}
+
+/** `'x'` of a module whose only statement is `module.exports = require('x')` (`exports = module.exports = ...` too). */
+export function passThroughRequire(sf: ts.SourceFile): string | undefined {
+  const statements = sf.statements.filter((s) => !(ts.isExpressionStatement(s) && ts.isStringLiteral(s.expression)));
+  const only = statements.length === 1 ? statements[0]! : undefined;
+  if (!only || !ts.isExpressionStatement(only)) return undefined;
+  let expr: ts.Expression = only.expression;
+  let assignsModuleExports = false;
+  while (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+    const left = expr.left;
+    if (ts.isPropertyAccessExpression(left) && ts.isIdentifier(left.expression) && left.expression.text === "module" && left.name.text === "exports") {
+      assignsModuleExports = true;
+    } else if (!(ts.isIdentifier(left) && left.text === "exports")) return undefined;
+    expr = expr.right;
+  }
+  if (!assignsModuleExports || !ts.isCallExpression(expr) || !ts.isIdentifier(expr.expression) || expr.expression.text !== "require") return undefined;
+  const [arg] = expr.arguments;
+  return expr.arguments.length === 1 && arg && ts.isStringLiteralLike(arg) ? arg.text : undefined;
+}
+
+const MAX_SHIM_HOPS = 3;
+
+/**
+ * TypeScript's resolution, then two substitutions so References reach implementations:
+ * a `.d.ts` with a JS twin in the Project resolves to the twin (TS tries `.d.ts` before `.js`),
+ * and a `module.exports = require('x')` shim resolves to `x` (the binder makes no alias of it).
+ */
+function createModuleResolver(
+  options: ts.CompilerOptions,
+  currentDirectory: string,
+  isSource: (abs: string) => boolean,
+  sourceOf: (abs: string) => ts.SourceFile | undefined,
+): NonNullable<ts.LanguageServiceHost["resolveModuleNameLiterals"]> {
+  const cache = ts.createModuleResolutionCache(currentDirectory, (s) => (ts.sys.useCaseSensitiveFileNames ? s : s.toLowerCase()), options);
+  const resolveOne = (
+    name: string,
+    containingFile: string,
+    mode: ts.ResolutionMode,
+    redirected: ts.ResolvedProjectReference | undefined,
+    hops: number,
+  ): ts.ResolvedModuleWithFailedLookupLocations => {
+    const result = ts.resolveModuleName(name, containingFile, options, ts.sys, cache, redirected, mode);
+    const found = result.resolvedModule;
+    if (!found) return result;
+    let resolvedFileName = resolve(found.resolvedFileName);
+    let extension = found.extension as ts.Extension;
+    const twin = implementationTwin(resolvedFileName, isSource);
+    if (twin) ({ file: resolvedFileName, extension } = twin);
+    else if (!isSource(resolvedFileName)) return result;
+    if (hops < MAX_SHIM_HOPS && /\.[mc]?jsx?$/.test(resolvedFileName)) {
+      const sf = sourceOf(resolvedFileName);
+      const inner = sf ? passThroughRequire(sf) : undefined;
+      if (inner !== undefined) {
+        const next = resolveOne(inner, resolvedFileName, ts.ModuleKind.CommonJS, redirected, hops + 1);
+        if (next.resolvedModule && isSource(resolve(next.resolvedModule.resolvedFileName))) return next;
+      }
+    }
+    if (!twin) return result;
+    return { ...result, resolvedModule: { ...found, resolvedFileName, extension, isExternalLibraryImport: false } };
+  };
+  return (literals, containingFile, redirected, opts, containingSourceFile) =>
+    literals.map((literal) => resolveOne(literal.text, containingFile, ts.getModeForUsageLocation(containingSourceFile, literal, opts), redirected, 0));
+}
+
 export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScope): SemanticProject {
   const started = performance.now();
   const { project } = index;
@@ -454,6 +537,7 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
     getDirectories: ts.sys.getDirectories,
     realpath: ts.sys.realpath,
     useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+    resolveModuleNameLiterals: createModuleResolver(options, currentDirectory, (f) => indexed.has(f), (f) => index.sourceFile(f)),
   };
   const service = ts.createLanguageService(host, ts.createDocumentRegistry());
   const program = service.getProgram();
@@ -560,8 +644,31 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
     start: number;
   }
 
+  /**
+   * The same-named top-level Declaration in the `.d.ts` beside a JS file, when that `.d.ts` is in the
+   * program: importers the resolver did not redirect (a package.json `types` field) bind to it.
+   */
+  const declarationTwin = (absFile: string, pos: number): { file: string; pos: number } | undefined => {
+    if (!/\.[mc]?jsx?$/.test(absFile)) return undefined;
+    const sf = program.getSourceFile(absFile);
+    const id = sf ? nodeAt(sf, pos) : undefined;
+    if (!id || !ts.isIdentifier(id)) return undefined;
+    const base = absFile.replace(/\.([mc]?)jsx?$/, "");
+    const twin = [".d.ts", ".d.mts", ".d.cts"].map((ext) => program.getSourceFile(base + ext)).find((t) => t !== undefined);
+    if (!twin) return undefined;
+    for (const statement of twin.statements) {
+      const names = ts.isVariableStatement(statement)
+        ? statement.declarationList.declarations.map((d) => d.name)
+        : "name" in statement && statement.name ? [statement.name as ts.Node] : [];
+      const hit = names.find((n) => ts.isIdentifier(n) && n.text === id.text);
+      if (hit) return { file: twin.fileName, pos: hit.getStart(twin) };
+    }
+    return undefined;
+  };
+
   const split = (absFile: string, pos: number): { result: ReferenceSplit; raw: Map<string, RawRef>; buckets: Map<string, "direct" | "via" | "dropped"> } => {
-    const groups = service.findReferences(absFile, pos) ?? [];
+    const twin = declarationTwin(absFile, pos);
+    const groups = [...(service.findReferences(absFile, pos) ?? []), ...(twin ? service.findReferences(twin.file, twin.pos) ?? [] : [])];
     const descriptors: Array<GroupDescriptor<RawRef>> = [];
     let target = -1;
     let flagged = -1;
@@ -659,7 +766,15 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
       const prepared = service.prepareCallHierarchy(absFile, pos);
       const items = prepared === undefined ? [] : Array.isArray(prepared) ? prepared : [prepared];
       if (items.length === 0) return undefined;
-      return items.flatMap((item) => splitSites(item.file, item.selectionSpan.start, service.provideCallHierarchyIncomingCalls(item.file, item.selectionSpan.start)));
+      const twin = declarationTwin(absFile, pos);
+      const twinCalls = twin ? service.provideCallHierarchyIncomingCalls(twin.file, twin.pos) : [];
+      const seen = new Set<string>();
+      return items
+        .flatMap((item) => splitSites(item.file, item.selectionSpan.start, [...service.provideCallHierarchyIncomingCalls(item.file, item.selectionSpan.start), ...twinCalls]))
+        .filter((site) => {
+          const key = `${site.file}:${site.line}:${site.col}`;
+          return !seen.has(key) && Boolean(seen.add(key));
+        });
     },
     incomingCallsOf(item) {
       if (item.kind === ts.ScriptElementKind.scriptElement) return [];

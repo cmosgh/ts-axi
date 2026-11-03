@@ -9,6 +9,10 @@ import { main } from "../src/cli.js";
 export const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "project");
 /** Script-style JavaScript without a tsconfig (AngularJS, Meteor, IIFE, prototype, CommonJS), read-only. */
 export const LEGACY_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "legacy-js");
+/** CommonJS package without a tsconfig: `require('..')` through an index shim, expando methods, a `.d.ts` twin. */
+export const COMMONJS_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "commonjs");
+/** `"type": "module"` package without a tsconfig: `index.js` + `index.d.ts`, `test.js` importing `./index.js`. */
+export const ESM_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "esm-js");
 /** The synthetic Nx + pnpm workspace, read-only. */
 export const WORKSPACE_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "workspace");
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { decode } from "@toon-format/toon";
 import { beforeAll, describe, expect, it } from "vitest";
 import { main } from "../src/cli.js";
-import { FIXTURE, fixtureCopy, LEGACY_FIXTURE, runner, WORKSPACE_FIXTURE, type RunResult } from "./helpers.js";
+import { COMMONJS_FIXTURE, ESM_FIXTURE, FIXTURE, fixtureCopy, LEGACY_FIXTURE, runner, WORKSPACE_FIXTURE, type RunResult } from "./helpers.js";
 
 type Payload = Record<string, unknown>;
 
@@ -627,6 +627,61 @@ describe("impact", () => {
       r.edit("client/app.js", '["$scope", "priceService", function ($scope, priceService)', '["$scope", "taxService", function ($scope, priceService)');
       expect((await impact(r))["local_only"]).toBe("1 (CartCtrl signature)");
     });
+
+    it("an expando method body edit is never local_only - its textual matches are counted", async () => {
+      const r = repo(COMMONJS_FIXTURE);
+      r.edit("lib/proto.js", "return '<' + view + '>';", "return '[' + view + ']';");
+      const data = await impact(r);
+      expect(changed(data)).toEqual([
+        expect.objectContaining({ symbol: "app.render", change: "body", refs_outside: 1, textual: 4, tests: 0 }),
+      ]);
+      expect(data["help"]).toEqual(
+        expect.arrayContaining(["Run `ts-axi impact --grep` for the 3 textual matches the checker cannot resolve (untyped JavaScript)"]),
+      );
+    });
+
+    it("keeps the table narrow when the checker resolves every textual match", async () => {
+      const r = repo(ESM_FIXTURE);
+      r.edit("index.js", "return queue.splice(0);", "return queue.splice(0, queue.length);");
+      const row = changed(await impact(r))[0]!;
+      expect(row).toMatchObject({ symbol: "drain", refs_outside: 2, tests: 1 });
+      expect(row).not.toHaveProperty("textual");
+    });
+  });
+});
+
+describe("plain JavaScript packages (no tsconfig)", () => {
+  let cjs: (...argv: string[]) => Promise<RunResult>;
+  let esm: (...argv: string[]) => Promise<RunResult>;
+  beforeAll(() => {
+    cjs = runner(fixtureCopy({ fixture: COMMONJS_FIXTURE }));
+    esm = runner(fixtureCopy({ fixture: ESM_FIXTURE }));
+  });
+
+  it("callers follow require('..') through a module.exports = require() shim", async () => {
+    const data = toon((await cjs("callers", "createApp")).stdout);
+    expect(data).toMatchObject({ declared_at: "lib/app.js:7", refs_total: 3, files: 2, tests: 1 });
+    expect((data["refs"] as Payload[]).map((r) => `${r["file"]}:${r["line"]}`)).toEqual(["examples/basic.js:5", "test/app.js:9", "test/app.js:14"]);
+  });
+
+  it("refs on an ESM default export reach importers of ./index.js despite index.d.ts", async () => {
+    const data = toon((await esm("refs", "limitQueue")).stdout);
+    expect(data).toMatchObject({ declared_at: "index.js:1", refs_total: 3, textual: "3 matches in 1 files", files: 1, tests: 1 });
+    expect(data["help"]).not.toEqual(expect.arrayContaining([expect.stringContaining("--grep")]));
+  });
+
+  it("an expando member prints its textual count and the --grep hint", async () => {
+    const data = toon((await cjs("refs", "app.render")).stdout);
+    expect(data).toMatchObject({ declared_at: "lib/proto.js:11", refs_total: 1, textual: "4 matches in 3 files" });
+    expect(data["help"]).toEqual(
+      expect.arrayContaining(["Run `ts-axi refs lib/proto.js:11 --grep` for the 3 textual matches the checker cannot resolve (untyped JavaScript)"]),
+    );
+    const grep = toon((await cjs("refs", "app.render", "--grep")).stdout);
+    expect((grep["unresolved"] as Payload[]).map((r) => `${r["file"]}:${r["line"]}`)).toEqual(["examples/basic.js:6", "test/app.js:10", "test/app.js:16"]);
+  });
+
+  it("the home view counts a root test.js as a Test file", async () => {
+    expect(toon((await esm()).stdout)).toMatchObject({ source_files: 2, test_files: 1 });
   });
 });
 

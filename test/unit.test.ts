@@ -156,7 +156,7 @@ describe("config command", () => {
     expect(await configCommand(["set", "test-globs", "**/*.it.ts"])).toContain("(no-op)");
     expect(await configCommand(["set", "test-globs", "**/*.test.*"])).toContain("(no-op)");
     const shown = await configCommand([]);
-    expect(shown).toContain("test_globs[7]{glob,source}:");
+    expect(shown).toContain("test_globs[10]{glob,source}:");
     expect(shown).toContain("**/*.it.ts,.ts-axi.json");
     expect(shown).toContain("project: none");
 

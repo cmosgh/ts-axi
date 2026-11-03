@@ -44,6 +44,7 @@ flags[7]:
 output:
   base, head, changes (count), changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}
   change = signature | removed | type | added | body | modified (before unavailable) - riskiest first
+  textual = column added only when an untyped (JavaScript; implicit project) Symbol has more whole-word matches outside the change set than refs_outside - those are uses the checker cannot resolve; - for typed rows; such a Change is never local_only
   refs_* / files / tests count direct References only; via = References outside the change set that reach the Symbol through an interface or base member it implements (or name an override of it) - they MAY call it
   refs[n]{symbol,file,line,context} = References outside the change set; truncated + refs_shown + refs_outside_total when cut
   notes[n]{symbol,note} = a signature change of a member that implements an interface or base member (the contract may break)
@@ -180,6 +181,10 @@ interface Row {
   via: ViaEntry[];
   /** Members the changed one implements or overrides. */
   bases: string[];
+  /** Whole-word matches outside the change set, for untyped Symbols only. */
+  textual?: TextualCount;
+  /** Of those, lines holding no known position (what `--grep` lists for this name). */
+  unresolved?: number;
 }
 
 /** Uses of a removed Symbol in the checkout: identifiers the checker can no longer resolve. */
@@ -308,6 +313,40 @@ export function textualMatches(
     }
   }
   return rows.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+}
+
+/** The checker may miss uses: JS declaring file, a string-registered name, or no tsconfig at all. */
+export function isUntyped(opened: Opened, decl: Declaration | undefined, file: string | undefined): boolean {
+  return decl?.nameless === true || opened.index.project.implicit || (file !== undefined && /\.[mc]?jsx?$/.test(file));
+}
+
+export interface TextualCount {
+  matches: number;
+  files: number;
+}
+
+/** Whole-word occurrences of `name` in Project files outside `changeSet`; lines declaring a `name` excluded. */
+export function textualCount(opened: Opened, name: string, changeSet: Map<string, Range[]> = new Map()): TextualCount {
+  let matches = 0;
+  let files = 0;
+  for (const abs of opened.index.files) {
+    const text = opened.index.text(abs);
+    if (text === undefined || !text.includes(name)) continue;
+    const rel = opened.index.rel(abs);
+    const declared = new Set(opened.index.declarations(abs).filter((d) => d.name === name).map((d) => d.nameLine));
+    const n = wordMatches(text, name).filter((m) => !declared.has(m.line) && !inRanges(changeSet.get(rel), m.line)).length;
+    matches += n;
+    if (n > 0) files++;
+  }
+  return { matches, files };
+}
+
+export function textualLine(count: TextualCount): string {
+  return `${count.matches} matches in ${count.files} files`;
+}
+
+export function textualHint(command: string, gap: number): string {
+  return `Run \`${command}\` for the ${gap} textual matches the checker cannot resolve (untyped JavaScript)`;
 }
 
 function siteKey(site: CallSite): string {
@@ -513,8 +552,15 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     row.all = entries.filter((e) => !e.isDefinition);
     row.outside = row.all.filter((e) => !inRanges(changeSet.get(e.file), e.line)).sort(byPosition);
   }
+  for (const row of rows) {
+    if (!row.live || !isUntyped(opened, row.live, row.live.file)) continue;
+    row.textual = textualCount(opened, row.live.name, changeSet);
+    if (row.textual.matches > 0) row.unresolved = textualMatches(opened, semantic, [row.live.name], known, new Set(), changeSet).length;
+  }
+  // Textual matches the checker did not resolve: such a Change is never local_only.
+  const textualGap = (r: Row): number => (r.textual && r.textual.matches > r.outside.length ? r.unresolved ?? 0 : 0);
   const shownRefs = (r: Row): Array<ReferenceEntry & { via?: string }> => (showVia ? [...r.outside, ...r.via].sort(byPosition) : r.outside);
-  const hasOutside = (r: Row): boolean => r.outside.length > 0 || r.via.length > 0;
+  const hasOutside = (r: Row): boolean => r.outside.length > 0 || r.via.length > 0 || textualGap(r) > 0;
 
   const listed = rows
     .filter(hasOutside)
@@ -574,7 +620,9 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   const removedTop = listed.find((r) => r.change.change === "removed");
   if (removedTop) help.push(`${removedTop.symbol} was removed but is still referenced - those files break`);
   if (truncated) help.push(`Showing ${refRows.length} of ${outsideTotal} ref rows; run \`${rerun(arg, parsed, `--limit ${Math.min(MAX_LIMIT, outsideTotal)}`)}\` for more`);
-  if (spots.length > 0 && !grep) help.push(`Run \`${rerun(arg, parsed, "--grep")}\` for textual matches the checker cannot see`);
+  const gap = listed.reduce((n, r) => n + textualGap(r), 0);
+  if (gap > 0 && !grep) help.unshift(textualHint(rerun(arg, parsed, "--grep"), gap));
+  if (spots.length > 0 && !grep && gap === 0) help.push(`Run \`${rerun(arg, parsed, "--grep")}\` for textual matches the checker cannot see`);
   if (depth === 1 && rows.some((r) => r.live && isFunctionLike(r.kind) && r.outside.length > 0)) {
     help.push(`Run \`${rerun(arg, parsed, "--depth 2")}\` for who calls the callers`);
   }
@@ -603,9 +651,10 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
               refs_total: r.all.length,
               refs_outside: r.outside.length,
               via: r.via.length,
+              ...(gap > 0 ? { textual: r.textual ? r.textual.matches : "-" } : {}),
               ...fileCounts(r),
             })),
-            refs: refRows,
+            ...(refRows.length > 0 ? { refs: refRows } : {}),
           }
         : {}),
       ...(truncated ? { truncated: true, refs_shown: refRows.length, refs_outside_total: outsideTotal } : {}),

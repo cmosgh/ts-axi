@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { importerClosure } from "../importers.js";
-import { textualMatches } from "./impact.js";
+import { isUntyped, textualCount, textualHint, textualLine, textualMatches, type TextualCount, type Unresolved } from "./impact.js";
 import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
@@ -43,7 +43,8 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   matches: 0 under -P lists found_outside_project[n]{file,line} when the name is declared outside that Project
   refs_total: 0 under -P in a workspace lists found_outside_project[n]{file,line} = importers outside that Project
   scope = in a monorepo without -P the program is the declaring file + its importers (scope_partial: true when the importer scan was capped)
-  tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references`;
+  tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references
+  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects); above refs_total = uses the checker cannot resolve - see refs --grep`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
 flags[12]:
@@ -196,7 +197,9 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const declaredAt = decl ? `${decl.file}:${decl.nameLine}` : def && def.line > 0 ? `${def.file}:${def.line}` : "(outside the Project)";
   const header = { ...warning, ...projectFields(opened), symbol, kind, declared_at: declaredAt };
   const explicit = Boolean(project || opened.settings.project);
-  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}) };
+  const declaredFile = decl?.file ?? (def && def.line > 0 ? def.file : undefined);
+  const textual = declaredFile !== undefined && isUntyped(opened, decl, declaredFile) ? textualCount(opened, symbol.split(".").pop()!) : undefined;
+  const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}), ...(textual ? { textual } : {}) };
 
   return mode === "calls"
     ? renderCallers(semantic, opened, resolved, header, { ...o, limit, depth })
@@ -215,6 +218,8 @@ interface Common {
   name: string;
   absFile: string;
   decl?: Declaration;
+  /** Whole-word count of the name for untyped Symbols (see `isUntyped`). */
+  textual?: TextualCount;
 }
 
 const OUTSIDE_ROWS = 5;
@@ -298,6 +303,31 @@ function viaFields(via: ViaRow[], bases: string[]): Record<string, unknown> {
   };
 }
 
+/** Whole-word matches of the name on lines that hold no known position (what `--grep` lists). */
+function unresolvedOf(opened: Opened, semantic: SemanticProject, o: Common, known: readonly Row[]): Unresolved[] {
+  return textualMatches(
+    opened,
+    semantic,
+    [o.symbol.split(".").pop()!],
+    new Set(known.map((r) => `${r.file}:${r.line}`)),
+    new Set(o.decl ? [`${o.decl.file}:${o.decl.line}`, `${o.decl.file}:${o.decl.nameLine}`] : []),
+    new Map(),
+  );
+}
+
+/**
+ * `textual` field and, when the name occurs more often than refs_total and some matches sit on no
+ * Reference line (`unresolved` = the `--grep` rows), the `--grep` hint.
+ */
+function textualFields(o: Common, refsTotal: number, unresolved: number, grepShown: boolean): { fields: Record<string, unknown>; help: string[] } {
+  if (!o.textual) return { fields: {}, help: [] };
+  const gap = o.textual.matches > refsTotal ? unresolved : 0;
+  return {
+    fields: { textual: textualLine(o.textual) },
+    help: gap > 0 && !grepShown ? [textualHint(`ts-axi refs ${o.declaredAt} --grep`, gap)] : [],
+  };
+}
+
 /** Direct rows, plus via rows (with a `via` column) under `--via`. */
 function mergedRows<T extends ViaRow>(direct: T[], via: T[], show: Show): T[] {
   return show.via ? sortRows([...direct, ...via]) : direct;
@@ -331,17 +361,10 @@ function renderRefs(
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
   help.unshift(...outside.help);
   const word = o.symbol.split(".").pop()!;
-  const unresolved = o.show.grep
-    ? textualMatches(
-        opened,
-        semantic,
-        [word],
-        new Set([...rows, ...via, ...impls].map((r) => `${r.file}:${r.line}`)),
-        new Set(o.decl ? [`${o.decl.file}:${o.decl.line}`, `${o.decl.file}:${o.decl.nameLine}`] : []),
-        new Map(),
-      )
-    : [];
-  if (o.decl?.nameless && !o.show.grep) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
+  const unresolved = o.show.grep || o.textual ? unresolvedOf(opened, semantic, o, [...rows, ...via, ...impls]) : [];
+  const text = textualFields(o, rows.length, unresolved.length, o.show.grep);
+  if (text.help.length > 0) help.unshift(...text.help);
+  else if (o.decl?.nameless && !o.show.grep) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
   if (isFunctionLike(o.kind)) help.push(`Run \`ts-axi callers ${o.declaredAt}\` for call sites with their enclosing function`);
   help.push(`Run \`ts-axi def ${o.declaredAt}\` for the declaration body`);
   help.push(...scopeHelp(o.scope));
@@ -350,6 +373,7 @@ function renderRefs(
       ...header,
       ...(o.decl?.nameless ? { note: NAMELESS_NOTE } : {}),
       refs_total: rows.length,
+      ...text.fields,
       files,
       tests,
       ...viaFields(via, split.bases),
@@ -417,10 +441,19 @@ function renderCallers(
   o: Common & { limit: number; depth: number },
 ): string {
   const sites = semantic.incomingCalls(resolved.absFile, resolved.pos);
+  // Every Reference line counts as known: the gap is what `refs --grep` would list.
+  const callerText = o.textual
+    ? (() => {
+        const split = semantic.referenceSplit(resolved.absFile, resolved.pos);
+        const known = [...split.direct, ...split.declarations, ...split.via, ...split.implementations, ...split.dropped, ...(sites ?? [])];
+        const calls = (sites ?? []).filter((s) => s.via === undefined).length;
+        return textualFields(o, calls, unresolvedOf(opened, semantic, o, known).length, false);
+      })()
+    : { fields: {}, help: [] };
   if (sites === undefined) {
     return out(
-      block({ ...header, refs_total: 0, note: "not callable - no call hierarchy for this Symbol", ...scopeFields(o.scope), ...footer(semantic, o.started, []) }),
-      helpBlock([`Run \`ts-axi refs ${o.declaredAt}\` for every Reference`]),
+      block({ ...header, refs_total: 0, ...callerText.fields, note: "not callable - no call hierarchy for this Symbol", ...scopeFields(o.scope), ...footer(semantic, o.started, []) }),
+      helpBlock([...callerText.help, `Run \`ts-axi refs ${o.declaredAt}\` for every Reference`]),
     );
   }
   const rows = sortRows(sites.filter((s) => s.via === undefined));
@@ -450,6 +483,7 @@ function renderCallers(
   if (top && o.depth === 1) help.push(`Run \`ts-axi callers ${o.declaredAt} --depth 2\` for who calls the callers`);
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
   help.unshift(...outside.help);
+  help.unshift(...callerText.help);
   help.push(`Run \`ts-axi refs ${o.declaredAt}${o.decl?.nameless ? " --grep" : ""}\` for every Reference (not only calls)`);
   help.push(...scopeHelp(o.scope));
   return out(
@@ -457,6 +491,7 @@ function renderCallers(
       ...header,
       ...(o.decl?.nameless ? { note: NAMELESS_NOTE } : {}),
       refs_total: rows.length,
+      ...callerText.fields,
       files,
       tests,
       ...viaFields(via, []),

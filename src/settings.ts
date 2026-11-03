@@ -13,6 +13,9 @@ export const DEFAULT_TEST_GLOBS: readonly string[] = [
   "**/test/**",
   "**/tests/**",
   "**/e2e/**",
+  "**/spec/**",
+  "**/test.*",
+  "**/*_test.*",
 ];
 
 export const SETTINGS_FILE = ".ts-axi.json";

@@ -29,7 +29,7 @@ describe("home view", () => {
     const data = await toon();
     expect(data).toMatchObject({
       tsconfig: "tsconfig.json",
-      test_globs: 7,
+      test_globs: 10,
       test_files: 4,
       settings: ".ts-axi.json (present)",
       git: "main (0 dirty)",
@@ -42,16 +42,16 @@ describe("config", () => {
   it("shows the .it.ts glob with its source", async () => {
     const data = await toon("config");
     const globs = rowsOf(data, "test_globs");
-    expect(globs).toHaveLength(7);
+    expect(globs).toHaveLength(10);
     expect(globs.find((g) => g["glob"] === "**/*.it.ts")).toMatchObject({ source: ".ts-axi.json" });
-    expect(globs.filter((g) => g["source"] === "default")).toHaveLength(6);
+    expect(globs.filter((g) => g["source"] === "default")).toHaveLength(9);
   });
 
   it("set test-globs round-trips through .ts-axi.json and a repeat is a no-op", async () => {
     const before = readFileSync(join(sample.dir, ".ts-axi.json"), "utf8");
     try {
       const added = await toon("config", "set", "test-globs", "**/*.e2e.ts");
-      expect(added).toMatchObject({ test_globs: "updated", added: ["**/*.e2e.ts"], effective_test_globs: 8 });
+      expect(added).toMatchObject({ test_globs: "updated", added: ["**/*.e2e.ts"], effective_test_globs: 11 });
       expect(JSON.parse(readFileSync(join(sample.dir, ".ts-axi.json"), "utf8"))).toEqual({
         testGlobs: ["**/*.it.ts", "**/*.e2e.ts"],
       });
@@ -60,11 +60,11 @@ describe("config", () => {
       expect(globs.find((g) => g["glob"] === "**/*.e2e.ts")).toMatchObject({ source: ".ts-axi.json" });
 
       const again = await toon("config", "set", "test-globs", "**/*.e2e.ts");
-      expect(again).toMatchObject({ test_globs: "unchanged (no-op)", effective_test_globs: 8 });
+      expect(again).toMatchObject({ test_globs: "unchanged (no-op)", effective_test_globs: 11 });
     } finally {
       sample.write(".ts-axi.json", before);
     }
-    expect(rowsOf(await toon("config"), "test_globs")).toHaveLength(7);
+    expect(rowsOf(await toon("config"), "test_globs")).toHaveLength(10);
   });
 });
 
