@@ -12,7 +12,7 @@ The place where a Symbol is introduced, plus its **kind**: `function`, `class`, 
 
 ## State
 
-A route of a client-side router, registered by name in a router configuration (`$stateProvider.state('cart', {...})`, `$routeProvider.when('/cart', {...})`). Qualified `states.cart` (`routes./cart`); the functions in its definition (`resolve` entries, `onEnter`, an inline controller) are its members, `states.cart.resolve.items`. Nameless.
+A route of a client-side router, registered by name in a router configuration (`$stateProvider.state('cart', {...})`, `$routeProvider.when('/cart', {...})`). Qualified `states.cart` (`routes./cart`); the functions in its definition (`resolve` entries, `onEnter`, an inline controller) are its members, `states.cart.resolve.items`. Nameless. A state object literal in an array that is declared or exported at module or IIFE level (`module.exports = [...].concat(childStates)`) is a State too, its name resolved from same-file string consts (`` `${base}.init` `` → `states.main.x.init`, `*` for what cannot be resolved).
 
 ## Template usage
 

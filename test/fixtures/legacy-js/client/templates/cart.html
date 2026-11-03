@@ -2,4 +2,10 @@
   <wap-select fallback-display-property="title" items="cart.items"></wap-select>
   <span data-price-tag amount="cart.total()"></span>
   <p>{{ cart.total() | money }}</p>
+  <wap-select
+    data-ng-if="cart.items.length > 1"
+    data-ng-model="cart.dock"
+    data-display-property="displayAlias" data-fallback-display-property="alias"
+    data-is-required="true"
+  ></wap-select>
 </div>

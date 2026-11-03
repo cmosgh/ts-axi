@@ -79,6 +79,40 @@ export interface TemplateUsage {
   col: number;
 }
 
+const TAG_SPAN_LINES = 40;
+
+/**
+ * Text of the tag open at `offset` (from its `<`), or undefined when `offset` is outside a tag or
+ * inside a quoted value. Forward scan from up to 40 lines back; `>` inside quotes does not close.
+ * Tolerant of broken markup: never throws, an unclosed quote just ends the tag at the scan point.
+ */
+function openTagBefore(text: string, offset: number, lineStarts: readonly number[]): string | undefined {
+  let lo = 0;
+  let hi = lineStarts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (lineStarts[mid]! <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  let tagStart = -1;
+  let quote = "";
+  for (let i = lineStarts[Math.max(0, lo - TAG_SPAN_LINES)]!; i < offset; i++) {
+    const c = text[i]!;
+    if (tagStart < 0) {
+      if (c === "<" && /[A-Za-z]/.test(text[i + 1] ?? "")) tagStart = i;
+    } else if (quote) {
+      if (c === quote) quote = "";
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === ">") {
+      tagStart = -1;
+    } else if (c === "<" && /[A-Za-z]/.test(text[i + 1] ?? "")) {
+      tagStart = i;
+    }
+  }
+  return tagStart < 0 || quote ? undefined : text.slice(tagStart, offset);
+}
+
 /** Usages of `target` in one template text: at most one per line. */
 export function usagesIn(text: string, target: TemplateTarget): Array<{ line: number; col: number }> {
   const result: Array<{ line: number; col: number }> = [];
@@ -90,11 +124,10 @@ export function usagesIn(text: string, target: TemplateTarget): Array<{ line: nu
     const offset = (m.index ?? 0) + (/^[<\s"'|]/.test(m[0]) ? 1 : 0);
     if (target.owner) {
       // The attribute counts only inside a tag opened by (or carrying) the owner directive.
-      const tagStart = text.lastIndexOf("<", offset);
-      if (tagStart < 0) continue;
-      const tag = text.slice(tagStart, offset);
+      const tag = openTagBefore(text, offset, lineStarts);
+      if (tag === undefined) continue;
       target.owner.lastIndex = 0;
-      if (tag.includes(">") || !target.owner.test(tag)) continue;
+      if (!target.owner.test(tag)) continue;
     }
     let lo = 0;
     let hi = lineStarts.length - 1;

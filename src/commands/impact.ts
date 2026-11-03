@@ -45,7 +45,7 @@ flags[7]:
 output:
   base, head, changes (count), changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}
   change = signature | removed | type | added | body | modified (before unavailable) - riskiest first
-  textual = column added only when an untyped (JavaScript; implicit project) Symbol has more whole-word matches outside the change set than refs_outside - those are uses the checker cannot resolve; - for typed rows; such a Change is never local_only
+  textual = column added only when an untyped (JavaScript; implicit project) Symbol has more whole-word matches outside the change set than refs_outside - those are uses the checker cannot resolve (declaring file only for a non-exported local); - for typed rows; such a Change is never local_only
   refs_* / files / tests count direct References only; via = References outside the change set that reach the Symbol through an interface or base member it implements (or name an override of it) - they MAY call it
   refs[n]{symbol,file,line,context} = References outside the change set; truncated + refs_shown + refs_outside_total when cut
   notes[n]{symbol,note} = a signature change of a member that implements an interface or base member (the contract may break)
@@ -289,7 +289,10 @@ export interface Unresolved {
   context: string;
 }
 
-/** Whole-word matches of `names` in Project files and templates that are not `known` References. */
+/**
+ * Whole-word matches of `names` in Project files and templates that are not `known` References;
+ * a name in `localTo` (name → absolute file) is searched in that file only.
+ */
 export function textualMatches(
   opened: Opened,
   semantic: SemanticProject,
@@ -297,6 +300,7 @@ export function textualMatches(
   known: Set<string>,
   skipLines: Set<string>,
   changeSet: Map<string, Range[]>,
+  localTo: Map<string, string> = new Map(),
 ): Unresolved[] {
   const files = [...semantic.projectFiles];
   const projectSet = new Set(files);
@@ -310,6 +314,7 @@ export function textualMatches(
     const declared = new Set(projectSet.has(abs) ? opened.index.declarations(abs).map((d) => d.nameLine) : []);
     const lines = new Set<number>();
     for (const name of names) {
+      if (localTo.has(name) && localTo.get(name) !== abs) continue;
       for (const m of wordMatches(text, name)) {
         if (known.has(`${rel}:${m.line}`) || skipLines.has(`${rel}:${m.line}`) || declared.has(m.line) || inRanges(changeSet.get(rel), m.line)) continue;
         if (lines.has(m.line)) continue;
@@ -330,16 +335,26 @@ export function isUntyped(opened: Opened, decl: Declaration | undefined, file: s
   return decl?.nameless === true || opened.index.project.implicit || (file !== undefined && /\.[mc]?jsx?$/.test(file));
 }
 
+/** A non-exported, non-member, identifier-named Declaration: only its own file can name it. */
+export function isPlainLocal(decl: Declaration | undefined): decl is Declaration {
+  return decl !== undefined && !decl.exported && !decl.nameless && decl.parentName === undefined;
+}
+
 export interface TextualCount {
   matches: number;
   files: number;
+  /** Counted in the declaring file only (a plain local). */
+  fileScoped?: true;
 }
 
-/** Whole-word occurrences of `name` in Project files outside `changeSet`; lines declaring a `name` excluded. */
-export function textualCount(opened: Opened, name: string, changeSet: Map<string, Range[]> = new Map()): TextualCount {
+/**
+ * Whole-word occurrences of `name` in Project files outside `changeSet`; lines declaring a `name` excluded.
+ * With `onlyFile` (absolute), that file alone.
+ */
+export function textualCount(opened: Opened, name: string, changeSet: Map<string, Range[]> = new Map(), onlyFile?: string): TextualCount {
   let matches = 0;
   let files = 0;
-  for (const abs of opened.index.files) {
+  for (const abs of onlyFile !== undefined ? [onlyFile] : opened.index.files) {
     const text = opened.index.text(abs);
     if (text === undefined || !text.includes(name)) continue;
     const rel = opened.index.rel(abs);
@@ -348,11 +363,11 @@ export function textualCount(opened: Opened, name: string, changeSet: Map<string
     matches += n;
     if (n > 0) files++;
   }
-  return { matches, files };
+  return { matches, files, ...(onlyFile !== undefined ? { fileScoped: true as const } : {}) };
 }
 
 export function textualLine(count: TextualCount): string {
-  return `${count.matches} matches in ${count.files} files`;
+  return count.fileScoped ? `${count.matches} matches in this file` : `${count.matches} matches in ${count.files} files`;
 }
 
 export function textualHint(command: string, gap: number): string {
@@ -587,8 +602,9 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   }
   for (const row of rows) {
     if (!row.live || !isUntyped(opened, row.live, row.live.file)) continue;
-    row.textual = textualCount(opened, row.live.name, changeSet);
-    if (row.textual.matches > 0) row.unresolved = textualMatches(opened, semantic, [row.live.name], known, new Set(), changeSet).length;
+    const localTo = isPlainLocal(row.live) ? new Map([[row.live.name, opened.index.abs(row.live.file)]]) : undefined;
+    row.textual = textualCount(opened, row.live.name, changeSet, localTo?.get(row.live.name));
+    if (row.textual.matches > 0) row.unresolved = textualMatches(opened, semantic, [row.live.name], known, new Set(), changeSet, localTo).length;
   }
   // Template usages: directives, components, bindings, controllers and filters named in .html and friends.
   let templateFiles: TemplateFile[] | undefined;
@@ -654,13 +670,21 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
 
   // --- Blind spots, textual matches, deeper callers ---
   const names = new Map<string, string>();
+  // A name is file-scoped only when every changed Declaration carrying it is a plain local of one file.
+  const localTo = new Map<string, string>();
+  const wide = new Set<string>();
   for (const r of rows) {
-    const name = (r.change.after ?? r.change.before!).name;
+    const decl = r.change.after ?? r.change.before!;
+    const name = decl.name;
     if (!names.has(name)) names.set(name, r.symbol);
+    const abs = opened.index.abs(decl.file);
+    if (!isPlainLocal(decl) || (localTo.has(name) && localTo.get(name) !== abs)) wide.add(name);
+    else localTo.set(name, abs);
   }
+  for (const name of wide) localTo.delete(name);
   const spots = blindSpots(semantic, names, changeSet);
   const textRows = grep
-    ? textualMatches(opened, semantic, [...names.keys()], known, new Set(spots.map((s) => `${s.file}:${s.line}`)), changeSet)
+    ? textualMatches(opened, semantic, [...names.keys()], known, new Set(spots.map((s) => `${s.file}:${s.line}`)), changeSet, localTo)
     : [];
   const unresolved = grep ? withTemplateRows(textRows, rows, templateFiles ?? []) : [];
 

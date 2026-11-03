@@ -640,6 +640,20 @@ describe("impact", () => {
       expect(symbols.join(" | ")).toContain("states.cart.resolve.items body");
     });
 
+    it("an edit inside a resolve of an exported state array names the resolve; a url edit is a signature change", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/outbound.states.js", "return res;", "return res.slice(0, 5);");
+      const data = await impact(r);
+      expect(data).not.toHaveProperty("file_level");
+      const symbols = [...((data["changed"] as Rows | undefined) ?? []).map((c) => `${c["symbol"]} ${c["change"]}`), String(data["local_only"] ?? "")];
+      expect(symbols.join(" | ")).toContain("states.main.warehouse.outbound.outboundInit.resolve.docks body");
+      const u = repo(LEGACY_FIXTURE);
+      u.edit("client/outbound.states.js", "url: '/init',", "url: '/start',");
+      const url = await impact(u);
+      const all = [...((url["changed"] as Rows | undefined) ?? []).map((c) => `${c["symbol"]} ${c["change"]}`), String(url["local_only"] ?? "")];
+      expect(all.join(" | ")).toContain("states.main.warehouse.outbound.outboundInit signature");
+    });
+
     it("a state hook edit is local - the router calls it, not a name", async () => {
       const r = repo(LEGACY_FIXTURE);
       r.edit("client/states.js", "window.scrollTo(0, 0);", "window.scrollTo(0, 10);");
@@ -651,7 +665,7 @@ describe("impact", () => {
       r.edit("client/directives.js", 'fallbackDisplayProperty: "=",', 'fallbackDisplayProperty: "<",');
       const alone = await impact(r);
       expect(changed(alone)).toEqual([
-        expect.objectContaining({ symbol: "wapSelect.fallbackDisplayProperty", kind: "property", change: "signature", templates: 1, tests: 0 }),
+        expect.objectContaining({ symbol: "wapSelect.fallbackDisplayProperty", kind: "property", change: "signature", templates: 2, tests: 0 }),
       ]);
       expect(alone).not.toHaveProperty("template_changes");
       r.edit("client/templates/cart.html", 'fallback-display-property="title"', 'fallback-display-property="label"');
@@ -786,11 +800,12 @@ describe("legacy JavaScript outline / def / refs", () => {
 
   it("refs on a directive counts its template usages; --grep lists them", async () => {
     const plain = toon((await legacy("refs", "wapSelect")).stdout);
-    expect(plain).toMatchObject({ symbol: "wapSelect", templates: "1 usages in 1 files" });
-    expect(plain["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs client/directives.js:3 --grep` for the 1 template usages"]));
+    expect(plain).toMatchObject({ symbol: "wapSelect", templates: "2 usages in 1 files" });
+    expect(plain["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs client/directives.js:3 --grep` for the 2 template usages"]));
     const grep = toon((await legacy("refs", "wapSelect", "--grep")).stdout);
     expect(grep["unresolved"]).toEqual([
       { file: "client/templates/cart.html", line: 2, context: '<wap-select fallback-display-property="title" items="cart.items"></wap-select>' },
+      { file: "client/templates/cart.html", line: 5, context: "<wap-select" },
     ]);
     const rows = async (target: string) =>
       ((toon((await legacy("refs", target, "--grep")).stdout)["unresolved"] as Payload[]) ?? []).filter((u) => String(u["file"]).endsWith(".html")).map((u) => `${u["file"]}:${u["line"]}`);
@@ -801,8 +816,35 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(toon((await legacy("refs", "wapSelect.items")).stdout)).toMatchObject({ templates: "1 usages in 1 files" });
   });
 
+  it("a binding on a multi-line tag counts past a quoted '>' in an earlier attribute", async () => {
+    const rows = ((toon((await legacy("refs", "wapSelect.fallbackDisplayProperty", "--grep")).stdout)["unresolved"] as Payload[]) ?? [])
+      .filter((u) => String(u["file"]).endsWith(".html"))
+      .map((u) => `${u["file"]}:${u["line"]}`);
+    expect(rows).toEqual(["client/templates/cart.html:2", "client/templates/cart.html:8"]);
+  });
+
+  it("outline lists state objects of exported arrays with names built from same-file consts", async () => {
+    expect(await names("client/outbound.states.js")).toEqual([
+      "4 state states.main.warehouse.outbound.outboundInit",
+      "9 method states.main.warehouse.outbound.outboundInit.resolve.docks",
+      "15 state states.*.outboundDone",
+      "21 state states.main.warehouse.outbound",
+    ]);
+    expect(await names("client/inbound.states.js")).toEqual(["2 state states.main.warehouse.inbound", "6 method states.main.warehouse.inbound.onEnter"]);
+    const def = await legacy("def", "client/outbound.states.js:15");
+    expect(def.stdout).toContain("file: client/outbound.states.js\nline: 15\nkind: state");
+    expect(fence(def.stdout)).toContain("warehouseOutboundDone");
+  });
+
+  it("textual counts a non-exported local in its own file only", async () => {
+    const local = toon((await legacy("refs", "lib/format.js:2")).stdout);
+    expect(local).toMatchObject({ symbol: "pad", textual: "2 matches in this file" });
+    const grep = toon((await legacy("refs", "lib/format.js:2", "--grep")).stdout);
+    expect(((grep["unresolved"] as Payload[] | number | undefined) ?? 0)).toEqual(0);
+  });
+
   it("refs on an IIFE helper goes through the LanguageService", async () => {
-    const data = toon((await legacy("refs", "pad")).stdout);
+    const data = toon((await legacy("refs", "lib/format.js:2")).stdout);
     expect(data).toMatchObject({ declared_at: "lib/format.js:2", refs_total: 2, files: 1 });
   });
 });

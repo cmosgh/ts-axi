@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { importerClosure } from "../importers.js";
-import { isUntyped, textualCount, textualHint, textualLine, textualMatches, type TextualCount, type Unresolved } from "./impact.js";
+import { isPlainLocal, isUntyped, textualCount, textualHint, textualLine, textualMatches, type TextualCount, type Unresolved } from "./impact.js";
 import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
@@ -45,7 +45,7 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   refs_total: 0 under -P in a workspace lists found_outside_project[n]{file,line} = importers outside that Project
   scope = in a monorepo without -P the program is the declaring file + its importers (scope_partial: true when the importer scan was capped)
   tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references
-  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects); above refs_total = uses the checker cannot resolve - see refs --grep
+  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects); 'n matches in this file' for a non-exported local; above refs_total = uses the checker cannot resolve - see refs --grep
   templates: n usages in m files = template uses (.html .htm .ejs .hbs .njk .pug) of a directive or component (<wap-select / wap-select / data-wap-select), its bindings (fallback-display-property= on that tag), a controller (ng-controller) or a filter (| money); refs --grep lists them in unresolved`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
@@ -200,7 +200,8 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const header = { ...warning, ...projectFields(opened), symbol, kind, declared_at: declaredAt };
   const explicit = Boolean(project || opened.settings.project);
   const declaredFile = decl?.file ?? (def && def.line > 0 ? def.file : undefined);
-  const textual = declaredFile !== undefined && isUntyped(opened, decl, declaredFile) ? textualCount(opened, symbol.split(".").pop()!) : undefined;
+  const localFile = isPlainLocal(decl) ? opened.index.abs(decl.file) : undefined;
+  const textual = declaredFile !== undefined && isUntyped(opened, decl, declaredFile) ? textualCount(opened, symbol.split(".").pop()!, new Map(), localFile) : undefined;
   const tplTarget = decl ? templateTarget(decl, opened.index.declarations(opened.index.abs(decl.file))) : undefined;
   const templates = tplTarget ? templateRows(loadTemplates(opened.root), tplTarget) : undefined;
   const o = { started, symbol, declaredAt, show, scope, explicit, label, name, absFile: resolved.absFile, ...(decl ? { decl } : {}), ...(textual ? { textual } : {}), ...(templates ? { templates } : {}) };
@@ -341,6 +342,7 @@ function unresolvedOf(opened: Opened, semantic: SemanticProject, o: Common, know
     new Set(known.map((r) => `${r.file}:${r.line}`)),
     new Set(o.decl ? [`${o.decl.file}:${o.decl.line}`, `${o.decl.file}:${o.decl.nameLine}`] : []),
     new Map(),
+    isPlainLocal(o.decl) ? new Map([[o.decl.name, opened.index.abs(o.decl.file)]]) : new Map(),
   );
 }
 

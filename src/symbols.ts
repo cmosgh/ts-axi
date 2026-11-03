@@ -275,6 +275,8 @@ const CONSTRUCTOR_VERBS: ReadonlySet<string> = new Set(["controller", "service",
 /** Router providers whose `.state(...)` / `.when(...)` calls declare a state (ui-router, ngRoute). */
 const STATE_PROVIDER = /^\$?stateProvider$/i;
 const ROUTE_PROVIDER = /^\$?routeProvider$/i;
+/** Keys that, next to a string `name`, make an array element a ui-router state object. */
+const STATE_KEYS: ReadonlySet<string> = new Set(["url", "resolve", "component", "controller", "template", "templateUrl", "views", "abstract"]);
 /** Directive definition keys whose object literal lists the bindings. */
 const BINDING_KEYS: ReadonlySet<string> = new Set(["scope", "bindToController", "bindings"]);
 /** `Template.x.<hook>(fn)` lifecycle callbacks. */
@@ -510,37 +512,91 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     }
   };
 
-  /** One `.state('name', {...})`, `.state({ name, ... })` or `.when('/path', {...})` call. */
-  const stateCall = (call: ts.CallExpression, route: boolean): void => {
-    const [first, second] = call.arguments;
-    const obj = first && ts.isObjectLiteralExpression(first) && !route ? first : second && ts.isObjectLiteralExpression(second) ? second : undefined;
-    if (!obj) return;
-    const literal = (key: string): string | undefined => {
-      const prop = obj.properties.find((p) => ts.isPropertyAssignment(p) && nameText(p.name, sf) === key) as ts.PropertyAssignment | undefined;
-      return prop && isStringName(prop.initializer) ? prop.initializer.text : undefined;
-    };
-    const name = isStringName(first) ? first.text : literal("name");
-    if (name === undefined) return;
-    const url = literal("url");
+  /** Same-file string consts (`const base = 'main.x'`), for state names built from them; ambiguous names dropped. */
+  let stringConsts: Map<string, ts.Expression | null> | undefined;
+  const constValue = (id: string, depth: number): string | undefined => {
+    if (!stringConsts) {
+      stringConsts = new Map();
+      const visit = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+          const init = unwrap(node.initializer);
+          if (isStringName(init) || ts.isTemplateExpression(init)) stringConsts!.set(node.name.text, stringConsts!.has(node.name.text) ? null : init);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sf);
+    }
+    const init = stringConsts.get(id);
+    return init && depth < 3 ? stateNameOf(init, depth + 1) : undefined;
+  };
+  /** A literal, a template literal (`${...}` = a same-file string const, else `*`) or a const identifier. */
+  const stateNameOf = (expr: ts.Expression, depth = 0): string | undefined => {
+    const e = unwrap(expr);
+    if (isStringName(e)) return e.text;
+    if (ts.isTemplateExpression(e)) {
+      return e.head.text + e.templateSpans.map((s) => (ts.isIdentifier(s.expression) ? (constValue(s.expression.text, depth) ?? "*") : "*") + s.literal.text).join("");
+    }
+    if (ts.isIdentifier(e)) return constValue(e.text, depth) ?? e.text;
+    return undefined;
+  };
+  const propOf = (obj: ts.ObjectLiteralExpression, key: string): ts.ObjectLiteralElementLike | undefined =>
+    obj.properties.find((p) => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && nameText(p.name, sf) === key);
+  /** `name` of a state object literal: `name: 'x'`, `` name: `${base}.x` ``, `name: base` or `{ name }`. */
+  const stateObjectName = (obj: ts.ObjectLiteralExpression): string | undefined => {
+    const prop = propOf(obj, "name");
+    if (prop && ts.isPropertyAssignment(prop)) return stateNameOf(prop.initializer);
+    if (prop && ts.isShorthandPropertyAssignment(prop)) return stateNameOf(prop.name);
+    return undefined;
+  };
+
+  /** A ui-router state object (`.state()` argument or array element) or an ngRoute config as a `state` Declaration plus its callbacks. */
+  const stateFromObject = (obj: ts.ObjectLiteralExpression, name: string, start: number, end: number, route: boolean): void => {
+    const url = propOf(obj, "url");
+    const urlText = url && ts.isPropertyAssignment(url) && isStringName(url.initializer) ? url.initializer.text : undefined;
     const parent = route ? "routes" : "states";
     // Plain-literal options are compared, not displayed: a new controller or template is a contract change.
     const options = obj.properties
       .filter((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && nameText(p.name, sf) !== "name" && nameText(p.name, sf) !== "url")
       .filter((p) => isStringName(p.initializer) || p.initializer.kind === ts.SyntaxKind.TrueKeyword || p.initializer.kind === ts.SyntaxKind.FalseKeyword)
       .map((p) => tokenText(p, sf, p.getStart(sf), p.end));
-    const callee = call.expression as ts.PropertyAccessExpression;
     nested({
-      start: callee.name.getStart(sf),
-      end: call.end,
+      start,
+      end,
       kind: "state",
       name,
       parentName: parent,
       exported: true,
-      signature: `${route ? "route" : "state"} ${name}${url !== undefined && !route ? ` (url ${url})` : ""}${options.length > 0 ? `\n${options.join("; ")}` : ""}`,
+      signature: `${route ? "route" : "state"} ${name}${urlText !== undefined && !route ? ` (url ${urlText})` : ""}${options.length > 0 ? `\n${options.join("; ")}` : ""}`,
       namePos: obj.getStart(sf),
       nameless: true,
     });
     stateMembers(obj, `${parent}.${name}`, 1);
+  };
+
+  /** One `.state('name', {...})`, `.state({ name, ... })` or `.when('/path', {...})` call. */
+  const stateCall = (call: ts.CallExpression, route: boolean): void => {
+    const [first, second] = call.arguments;
+    const obj = first && ts.isObjectLiteralExpression(first) && !route ? first : second && ts.isObjectLiteralExpression(second) ? second : undefined;
+    if (!obj) return;
+    const name = isStringName(first) ? first.text : route ? undefined : stateObjectName(obj);
+    if (name === undefined) return;
+    stateFromObject(obj, name, (call.expression as ts.PropertyAccessExpression).name.getStart(sf), call.end, route);
+  };
+
+  /** State objects among the elements of an array literal, or of `[...].concat([...], ...)`; other values ignored. */
+  const stateArray = (expr: ts.Expression): void => {
+    const e = unwrap(expr);
+    if (ts.isArrayLiteralExpression(e)) {
+      for (const el of e.elements) {
+        const obj = unwrap(el);
+        if (!ts.isObjectLiteralExpression(obj) || !obj.properties.some((p) => STATE_KEYS.has(nameText(p.name, sf) ?? ""))) continue;
+        const name = stateObjectName(obj);
+        if (name !== undefined) stateFromObject(obj, name, obj.getStart(sf), obj.end, false);
+      }
+    } else if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === "concat") {
+      stateArray(e.expression.expression);
+      for (const arg of e.arguments) stateArray(arg);
+    }
   };
 
   /** `$stateProvider.state(...).state(...)` and `$routeProvider.when(...)` chains; `.otherwise()` ignored. */
@@ -607,8 +663,10 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     const target = compact(left, sf);
     if (target === "module.exports") {
       if (ts.isObjectLiteralExpression(right)) objectMembers(right, "exports", true);
+      else stateArray(right);
       return;
     }
+    if (target === `exports.${left.name.text}` || target === `module.exports.${left.name.text}`) stateArray(right);
     const owner = left.expression;
     if (ts.isPropertyAccessExpression(owner) && owner.name.text === "prototype" && ts.isIdentifier(owner.expression)) {
       const cls = owner.expression.text;
@@ -644,6 +702,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
         if (fn && takesRouter(fn)) routerBody(fn.body);
         const exported = inIife ? false : topLevelExported(name);
         const init = unwrap(decl.initializer);
+        stateArray(init);
         if (ts.isObjectLiteralExpression(init)) objectMembers(init, name, exported);
         else if (fn && isConstructorName(name)) thisMembers(fn.body, name, exported);
         else {
@@ -658,6 +717,8 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       if (body) scriptStatements(body, true);
       else if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.EqualsToken) assignment(statement, expr);
       else callChain(expr);
+    } else if (ts.isExportAssignment(statement)) {
+      stateArray(statement.expression);
     } else if (ts.isIfStatement(statement)) {
       scriptStatement(statement.thenStatement, inIife);
       if (statement.elseStatement) scriptStatement(statement.elseStatement, inIife);

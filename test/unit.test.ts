@@ -789,6 +789,14 @@ describe("template usages", () => {
     expect(lines(html, "wapSelect.items")).toEqual([4]);
   });
 
+  it("a tag spans lines and ends at a '>' outside quotes; broken markup never throws", () => {
+    const html = ["<wap-select", '  data-ng-if="a > 1"', "  data-fallback-display-property='b'", "></wap-select>", '<other title="items x" fallback-display-property="c">'].join("\n");
+    expect(lines(html, "wapSelect.fallbackDisplayProperty")).toEqual([3]);
+    expect(lines('<wap-select title="x fallback-display-property="', "wapSelect.fallbackDisplayProperty")).toEqual([]);
+    expect(lines('<wap-select data-x="unclosed\n<wap-select items="z">', "wapSelect.items")).toEqual([]);
+    expect(lines(`${"\n".repeat(50)}<wap-select${"\n".repeat(45)} items="far">`, "wapSelect.items")).toEqual([]);
+  });
+
   it("controllers in ng-controller, filters after a single pipe", () => {
     expect(lines('<div ng-controller="CartCtrl as c">\n<div data-ng-controller=\'CartCtrlX\'>', "CartCtrl")).toEqual([1]);
     expect(lines("{{ a | money }}\n{{ a || money }}\n{{ a |money:2 }}", "money")).toEqual([1, 3]);
