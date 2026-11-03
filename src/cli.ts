@@ -61,6 +61,8 @@ export interface MainOptions {
   stdout?: { write: (chunk: string) => unknown };
   /** Working directory for the run (default `process.cwd()`); tests pass a fixture path. */
   cwd?: string;
+  /** Stdin for `impact -` (tests); default `process.stdin`. */
+  stdin?: string;
 }
 
 export async function main(options: MainOptions = {}): Promise<void> {
@@ -69,7 +71,7 @@ export async function main(options: MainOptions = {}): Promise<void> {
   const json = argv.includes("--json");
   setJsonMode(json);
   const stdout = options.stdout ?? process.stdout;
-  const ctx: CommandContext = { cwd: options.cwd ?? process.cwd() };
+  const ctx: CommandContext = { cwd: options.cwd ?? process.cwd(), ...(options.stdin !== undefined ? { stdin: options.stdin } : {}) };
   // home/config may take the context as an optional second parameter.
   const home: Handler = homeCommand;
   let buffered = "";

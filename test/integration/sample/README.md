@@ -4,7 +4,7 @@ A small "Lantern Coffee" one-page Astro + React site. Names and content are synt
 
 It is vendored in ts-axi (`test/integration/sample/`) as its integration-test target: the code is
 shaped to exercise `def`, `refs`, `callers`, `outline` and `impact` (barrel re-exports, a JS
-consumer of TS, ambiguous names, dynamic-access blind spots, non-standard test file names via
+consumer of TS, React hooks and JSX component references, ambiguous names, dynamic-access blind spots, non-standard test file names via
 `.ts-axi.json`).
 
 ```sh

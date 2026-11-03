@@ -18,6 +18,23 @@ import {
 } from "../src/git.js";
 import { DEFAULT_TEST_GLOBS, isTestFile, loadSettings, readSettingsFile, writeSettingsFile } from "../src/settings.js";
 import { configCommand } from "../src/commands/config.js";
+import {
+  allocateBudget,
+  classifyFile,
+  compareChanges,
+  formatRanges,
+  innermost,
+  liftTypeLevel,
+  localOnlyLine,
+  mapRanges,
+  rankOf,
+  reverseApply,
+  signatures,
+  wordMatches,
+  type FileInput,
+} from "../src/impact.js";
+import { parseSource } from "../src/project.js";
+import { collectDeclarations } from "../src/symbols.js";
 
 let dir: string;
 beforeEach(() => {
@@ -406,5 +423,129 @@ describe.skipIf(!gitAvailable())("git helpers", () => {
     });
     await expect(diffUnified(dir, "no-such-rev")).rejects.toMatchObject({ code: "GIT_ERROR" });
     await expect(showFile(dir, "no-such-rev", "a.ts")).rejects.toMatchObject({ code: "GIT_ERROR" });
+  });
+});
+
+describe("impact logic", () => {
+  const classify = (before: string | null | undefined, after: string | null, diff: string, status: FileInput["status"] = "modified") => {
+    const [file] = parseUnifiedDiff(diff);
+    const ranges = changedRanges(file!);
+    return classifyFile({ path: "src/a.ts", status, ...ranges, beforeText: before, afterText: after });
+  };
+  const header = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n";
+  const BEFORE = [
+    'import { x } from "./x";',
+    "export function f(a: number): number {",
+    "  return a + 1;",
+    "}",
+    "export interface Shape {",
+    "  w: number;",
+    "}",
+    "export class Box {",
+    "  size(): number {",
+    "    return 1;",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  const edit = (from: string, to: string) => BEFORE.replace(from, to);
+  const summary = (r: ReturnType<typeof classifyFile>) => r.changes.map((c) => `${c.key} ${c.change}`);
+
+  it("classifies a body edit as body", () => {
+    const r = classify(BEFORE, edit("a + 1", "a + 2"), `${header}@@ -3 +3 @@\n-  return a + 1;\n+  return a + 2;\n`);
+    expect(summary(r)).toEqual(["f#function body"]);
+    expect(r.fileLevel).toBeUndefined();
+  });
+
+  it("classifies a parameter change as signature; whitespace and comments are not one", () => {
+    const sig = classify(BEFORE, edit("(a: number)", "(a: number, b = 0)"), `${header}@@ -2 +2 @@\n-export function f(a: number): number {\n+export function f(a: number, b = 0): number {\n`);
+    expect(summary(sig)).toEqual(["f#function signature"]);
+    const ws = classify(BEFORE, edit("(a: number)", "( a:  number /* id */ )"), `${header}@@ -2 +2 @@\n-export function f(a: number): number {\n+export function f( a:  number /* id */ ): number {\n`);
+    expect(summary(ws)).toEqual(["f#function body"]);
+  });
+
+  it("lifts interface members to the interface as a type change", () => {
+    const r = classify(BEFORE, edit("w: number", "w: string"), `${header}@@ -6 +6 @@\n-  w: number;\n+  w: string;\n`);
+    expect(summary(r)).toEqual(["Shape#interface type"]);
+  });
+
+  it("maps a class member line to the member, not the class", () => {
+    const r = classify(BEFORE, edit("return 1;", "return 2;"), `${header}@@ -10 +10 @@\n-    return 1;\n+    return 2;\n`);
+    expect(summary(r)).toEqual(["Box.size#method body"]);
+  });
+
+  it("reports added and removed Declarations", () => {
+    const added = classify(BEFORE, `${BEFORE}export const g = (): void => {};\n`, `${header}@@ -12,0 +13 @@\n+export const g = (): void => {};\n`);
+    expect(summary(added)).toEqual(["g#function added"]);
+    const removed = classify(BEFORE, edit("export function f(a: number): number {\n  return a + 1;\n}\n", ""), `${header}@@ -2,3 +1,0 @@\n-export function f(a: number): number {\n-  return a + 1;\n-}\n`);
+    expect(summary(removed)).toEqual(["f#function removed"]);
+    expect(removed.changes[0]!.before).toMatchObject({ exported: true, line: 2 });
+  });
+
+  it("puts lines outside any Declaration in one file-level entry", () => {
+    const r = classify(BEFORE, edit('"./x"', '"./y"'), `${header}@@ -1 +1 @@\n-import { x } from "./x";\n+import { x } from "./y";\n`);
+    expect(r.changes).toEqual([]);
+    expect(r.fileLevel).toEqual({ after: [[1, 1]], before: [] });
+  });
+
+  it("is modified when the before version is unavailable", () => {
+    const r = classify(undefined, edit("a + 1", "a + 2"), `${header}@@ -3 +3 @@\n-  return a + 1;\n+  return a + 2;\n`);
+    expect(summary(r)).toEqual(["f#function modified"]);
+  });
+
+  it("innermost and liftTypeLevel pick the narrowest meaningful Declaration", () => {
+    const decls = collectDeclarations(parseSource("src/a.ts", BEFORE), "src/a.ts");
+    expect(innermost(decls, 10)?.qualifiedName).toBe("Box.size");
+    expect(innermost(decls, 1)).toBeUndefined();
+    expect(liftTypeLevel(decls, innermost(decls, 6)!).qualifiedName).toBe("Shape");
+    const mapped = mapRanges(decls, [[1, 3]]);
+    expect([...mapped.touched.keys()]).toEqual(["f#function"]);
+    expect(mapped.outside).toEqual([1]);
+  });
+
+  it("signatures join overloads so adding one changes the Signature", () => {
+    const one = "export function p(a: string): string;\nexport function p(a: any) { return a; }\n";
+    const two = "export function p(a: string): string;\nexport function p(a: number): number;\nexport function p(a: any) { return a; }\n";
+    const sig = (text: string) => {
+      const sf = parseSource("src/a.ts", text);
+      return signatures(sf, collectDeclarations(sf, "src/a.ts")).get("p#function");
+    };
+    expect(sig(one)).not.toBe(sig(two));
+    expect(sig(one)!.split("\n")).toHaveLength(2);
+  });
+
+  it("reverseApply rebuilds the before text from -U0 and context hunks; null on mismatch", () => {
+    const after = edit("a + 1", "a + 2").replace('"./x"', '"./y"');
+    const u0 = parseUnifiedDiff(`${header}@@ -1 +1 @@\n-import { x } from "./x";\n+import { x } from "./y";\n@@ -3 +3 @@\n-  return a + 1;\n+  return a + 2;\n`)[0]!;
+    expect(reverseApply(after, u0.hunks)).toBe(BEFORE);
+    const ctx = parseUnifiedDiff(`${header}@@ -2,3 +2,3 @@\n export function f(a: number): number {\n-  return a + 1;\n+  return a + 2;\n }\n`)[0]!;
+    expect(reverseApply(edit("a + 1", "a + 2"), ctx.hunks)).toBe(BEFORE);
+    const deletion = parseUnifiedDiff(`${header}@@ -12,0 +13 @@\n+// tail\n`)[0]!;
+    expect(reverseApply(`${BEFORE}// tail\n`, deletion.hunks)).toBe(BEFORE);
+    expect(reverseApply(BEFORE, u0.hunks)).toBeNull();
+  });
+
+  it("orders exported signature/removed first, then type, added, body, modified", () => {
+    const row = (change: Parameters<typeof rankOf>[0], exported: boolean, refsOutside = 1) => ({ change, exported, refsOutside, file: "a.ts", line: 1 });
+    const sorted = [row("body", true, 9), row("modified", true), row("added", false), row("type", true), row("removed", true), row("signature", false), row("signature", true)]
+      .sort(compareChanges)
+      .map((r) => `${r.change}${r.exported ? "" : "-local"}`);
+    expect(sorted).toEqual(["removed", "signature", "type", "added-local", "signature-local", "body", "modified"]);
+  });
+
+  it("allocateBudget keeps each symbol's first rows and spends the whole budget", () => {
+    expect(allocateBudget([100, 2, 100], 50)).toEqual([24, 2, 24]);
+    expect(allocateBudget([3, 0, 1], 50)).toEqual([3, 0, 1]);
+    expect(allocateBudget([5, 5, 5], 2)).toEqual([1, 1, 0]);
+  });
+
+  it("formats local_only, ranges and whole-word matches", () => {
+    expect(localOnlyLine(["a body", "b added"])).toBe("2 (a body; b added)");
+    expect(localOnlyLine(Array.from({ length: 12 }, (_, i) => `n${i} body`))).toMatch(/^12 \(n0 body; .*n9 body; \+2\)$/);
+    expect(formatRanges([[1, 3], [7, 7]])).toBe("1-3 7");
+    expect(wordMatches("save(); autosave; user.save\n$save save$", "save")).toEqual([
+      { line: 1, col: 1 },
+      { line: 1, col: 24 },
+    ]);
   });
 });

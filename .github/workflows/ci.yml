@@ -25,6 +25,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
 
+  # Opt-in suite: drives the built CLI against the vendored Astro sample (needs network for its install).
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install the sample's dependencies
+        working-directory: test/integration/sample
+        run: corepack pnpm install --frozen-lockfile
+      - run: pnpm run test:integration
+
   # Dev tooling needs Node 22+, but the published CLI promises Node 20+.
   runtime-node20:
     runs-on: ubuntu-latest

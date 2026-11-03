@@ -5,20 +5,35 @@ Agent-ergonomic **TypeScript / JavaScript** code CLI, built on the [AXI](https:/
 It is **change-impact first**. When an agent reviews a diff, the expensive question is "what else does this touch?" - normally answered by grepping and reading dozens of files. `ts-axi impact` answers it from the compiler's own symbol resolution: for every declaration the diff changes, it lists the references *outside* the change set, grouped by file, with test coverage counted separately.
 
 ```
-# ILLUSTRATIVE - synthetic names, not real output
+# real output: test/integration/sample on a branch that adds a `locale` parameter
+# to formatPrice and edits the body of Cart.total
 $ ts-axi impact main...HEAD
+base: 923fb4d7ddc8f4e5c4df9029be388f8cb29ce095
+head: HEAD
 changes: 2
-changes[2]{symbol,kind,change,exported,refs_outside,tests}:
-  UserService.save,method,signature,true,14,2
-  formatName,function,body,true,3,0
-refs[17]{file,line,context}:
-  src/api/users.ts,41,"await users.save(input, { retry: true });"
+changed[2]{symbol,kind,change,exported,at,refs_total,refs_outside,files,tests}:
+  formatPrice,function,signature,true,"src/lib/format.ts:5",13,12,6,2
+  Cart.total,method,body,true,"src/lib/cart.ts:32",8,8,5,3
+refs[20]{symbol,file,line,context}:
+  formatPrice,src/components/Counter.tsx,2,"import { formatPrice } from '../lib';"
+  formatPrice,src/components/Counter.tsx,12,"{cups} cups = {formatPrice(cups * CUP_CENTS)}"
+  formatPrice,src/lib/analytics.js,4,"return { event: 'purchase', value: formatPrice(cents, 'EUR') };"
   ...
-help[2]:
-  - ...
+  Cart.total,src/components/CartSummary.tsx,10,setTotal(cart.total());
+  Cart.total,src/hooks/useCart.ts,35,"total: cart.total(),"
+  ...
+blind_spots[1]{symbol,file,line,reason}:
+  Cart.total,src/components/CartSummary.tsx,16,string key 'total' on a type without that member
+elapsed_ms: 679
+help[5]:
+  - "Run `ts-axi refs src/lib/format.ts:5` for every Reference of formatPrice"
+  - "Run `ts-axi callers src/lib/format.ts:5` for its call sites with the enclosing function"
+  - "Run `ts-axi def src/lib/format.ts:5` for the changed declaration"
+  - Run `ts-axi impact main...HEAD --grep` for textual matches the checker cannot see
+  - Run `ts-axi impact main...HEAD --depth 2` for who calls the callers
 ```
 
-<!-- TODO(phase 4): replace the block above with real output from the fixture project. -->
+(`...` marks rows cut from this README; the command prints all 20.)
 
 Read-only: no lint, no refactor, no rename.
 
@@ -53,7 +68,7 @@ npx skills add cmosgh/ts-axi --skill ts-axi
 | `refs <target>` | References of one symbol, grouped by file, with test counts. `--limit`, `--kind calls` |
 | `callers <target>` | Incoming calls of a function-like symbol. `--depth 1..3` |
 | `outline <file>` | Top-level declarations in source order, class members nested. `--exports` |
-| `impact [<git-range> \| -]` | Declarations changed by the working tree (`--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), each with its outside references and blind spots |
+| `impact [<git-range> \| -]` | Declarations changed by the working tree (untracked files included; `--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), riskiest first: change class (`signature`, `removed`, `type`, `added`, `body`, `modified`), References outside the change set, test-file counts, `blind_spots`, `local_only`, `file_level` and `skipped` (non-TS files in the diff). `--limit`, `--depth 2..3`, `--grep`. Analyses the current checkout |
 | `config` | Show effective settings with their source; `config set <key> <value>` and `config unset <key>` write `.ts-axi.json` |
 
 `ts-axi <command> --help` prints a concise, complete flag reference. `-P <tsconfig>` selects a project on any command that may analyse types; `--json` prints the decoded payload.

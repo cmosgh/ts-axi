@@ -169,6 +169,12 @@ export async function diffNameStatus(
   return result;
 }
 
+/** Untracked, not ignored files (repo-root-relative): `git diff` never lists them. */
+export async function untrackedFiles(cwd: string): Promise<string[]> {
+  const stdout = await runOrThrow(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--full-name", ":/"]);
+  return stdout.split("\0").filter((p) => p !== "");
+}
+
 /** Raw unified diff with zero context lines; same target rules as `diffNameStatus`. */
 export async function diffUnified(cwd: string, range?: string, staged?: boolean): Promise<string> {
   const target = await diffTarget(cwd, range, staged);

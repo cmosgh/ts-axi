@@ -1,6 +1,8 @@
 ---
 import Counter from '../components/Counter';
 import CartSummary from '../components/CartSummary';
+import ProductList from '../components/ProductList';
+import { CartBadge } from '../components/CartBadge';
 import { formatDate } from '../lib/format';
 
 const today = formatDate(new Date());
@@ -17,5 +19,7 @@ const today = formatDate(new Date());
     <p>Small-batch roasts, open daily. Menu as of {today}.</p>
     <Counter client:load />
     <CartSummary client:load />
+    <ProductList client:load />
+    <CartBadge client:load />
   </body>
 </html>

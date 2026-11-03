@@ -42,7 +42,7 @@ Input, all normalised to `{ file → changed line ranges (after), file → chang
 - `impact` → working tree vs `HEAD` (staged + unstaged); `impact --staged` → index vs HEAD.
 - `impact <range>` → any `git diff` range: `main...HEAD`, `abc123`, `v1..v2`.
 - `impact -` → unified diff on stdin (e.g. `bb-axi pr diff 42 --raw | ts-axi impact -`). Paths are taken relative to the repo root (`a/`, `b/` prefixes stripped).
-- `git` via `child_process` only. Not a git repo and no stdin diff → `VALIDATION_ERROR` with the `impact -` alternative.
+- `git` via `child_process` only. Not a git repo and no stdin diff → `GIT_ERROR` (exit 3) with the `impact -` alternative.
 
 Before-version: `git show <base>:<path>` read in memory for touched files only; parsed syntactically to find the before-Declarations and Signatures. With stdin input and no repo, the before Signature is rebuilt from the `-` lines of the hunk when the whole declaration header is present; otherwise the change class is `modified`.
 
@@ -86,7 +86,7 @@ Located at the git root (or cwd when not a repo). Unknown keys → `VALIDATION_E
 ## Phases
 
 1. Scaffold, spec, glossary, ADR (done).
-2. Engine + `def` / `refs` / `callers` / `outline` + `cli.ts` wiring. In parallel: `config`, `.ts-axi.json`, test-glob matching, `git.ts`, `diff.ts` (unified-diff parser), home view, `skill.ts`, README skeleton.
-3. `impact`.
-4. Tests to green, README with real examples, SKILL.md, `pnpm run check`.
+2. Engine + `def` / `refs` / `callers` / `outline` + `cli.ts` wiring; `config`, `.ts-axi.json`, test-glob matching, `git.ts`, `diff.ts`, home view, `skill.ts`, README (done).
+3. `impact` (done). Shape as shipped: one `changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,files,tests}` table plus a flat `refs[n]{symbol,file,line,context}` table, `file_level[n]`, `blind_spots[n]{symbol,file,line,reason}`, `skipped[n]{file,reason}` for non-analysed files (`.astro`, `.css`, ...). `impact -` rebuilds the before version by reverse-applying hunks; untracked files count as `added`.
+4. Unit + command tests (`pnpm test`) and the opt-in integration suite over the vendored Astro sample (`pnpm run test:integration`, `test/integration/README.md`) (done).
 5. Phase 2 ideas (not now): daemon/cache, multi-tsconfig, vitest/jest config suggestion, token benchmark like mysql-axi.

@@ -2,4 +2,6 @@
 export interface CommandContext {
   /** Directory the command runs in; tests pass a fixture path instead of chdir. */
   cwd: string;
+  /** Stdin content for `impact -`; undefined = read `process.stdin`. */
+  stdin?: string;
 }

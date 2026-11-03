@@ -1,8 +1,11 @@
-import { writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decode } from "@toon-format/toon";
 import { beforeAll, describe, expect, it } from "vitest";
-import { fixtureCopy, runner, type RunResult } from "./helpers.js";
+import { main } from "../src/cli.js";
+import { FIXTURE, fixtureCopy, runner, type RunResult } from "./helpers.js";
 
 type Payload = Record<string, unknown>;
 
@@ -272,9 +275,217 @@ describe("cli", () => {
     expect((await run("--help")).stdout).toContain("def, refs, callers, outline, impact, config");
   });
 
-  it("impact is a stub until phase 3", async () => {
-    const { stdout, exitCode } = await run("impact");
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain("impact: not implemented yet");
+});
+
+describe("impact", () => {
+  type Rows = Payload[];
+  const git = (dir: string, ...args: string[]): string =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" });
+
+  /** A fixture copy on branch main with one commit, plus file editing helpers. */
+  function repo() {
+    const dir = fixtureCopy();
+    git(dir, "symbolic-ref", "HEAD", "refs/heads/main");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "base");
+    const path = (rel: string) => join(dir, rel);
+    return {
+      dir,
+      run: runner(dir),
+      edit(rel: string, from: string, to: string) {
+        const text = readFileSync(path(rel), "utf8");
+        expect(text).toContain(from);
+        writeFileSync(path(rel), text.replace(from, to));
+      },
+      write: (rel: string, text: string) => writeFileSync(path(rel), text),
+      git: (...args: string[]) => git(dir, ...args),
+    };
+  }
+
+  async function impact(r: ReturnType<typeof repo>, ...argv: string[]): Promise<Payload> {
+    const { stdout, exitCode } = await r.run("impact", ...argv);
+    expect(exitCode).toBe(0);
+    return toon(stdout);
+  }
+  const changed = (data: Payload) => data["changed"] as Rows;
+  const refsOf = (data: Payload, symbol: string) =>
+    (data["refs"] as Rows).filter((r) => r["symbol"] === symbol).map((r) => `${r["file"]}:${r["line"]}`);
+
+  it("classifies a body edit and lists References outside the change set", async () => {
+    const r = repo();
+    r.edit("src/models/user.ts", "this.secret = this.id;", "this.secret = `${this.id}`;");
+    const data = await impact(r);
+    expect(data).toMatchObject({ base: "HEAD", head: "working tree", changes: 1 });
+    expect(changed(data)).toEqual([
+      { symbol: "User.save", kind: "method", change: "body", exported: true, at: "src/models/user.ts:13", refs_total: 2, refs_outside: 2, files: 2, tests: 0 },
+    ]);
+    expect(refsOf(data, "User.save")).toEqual(["src/legacy/util.js:5", "src/services/sync.ts:13"]);
+    expect(data["elapsed_ms"]).toEqual(expect.any(Number));
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi refs src/models/user.ts:13")]));
+  });
+
+  it("puts the any access and the string key in src/dynamic.ts in blind_spots", async () => {
+    const r = repo();
+    r.edit("src/models/user.ts", "this.secret = this.id;", "this.secret = String(this.id);");
+    const data = await impact(r);
+    expect(data["blind_spots"]).toEqual([
+      { symbol: "User.save", file: "src/dynamic.ts", line: 4, reason: "property access on any" },
+      { symbol: "User.save", file: "src/dynamic.ts", line: 5, reason: "string key 'save' on a type without that member" },
+    ]);
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi impact --grep")]));
+  });
+
+  it("classifies a parameter change as signature and flags tests: 0", async () => {
+    const r = repo();
+    r.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    const data = await impact(r);
+    expect(changed(data)[0]).toMatchObject({ symbol: "parse", change: "signature", exported: true, refs_outside: 2, files: 1, tests: 0 });
+    expect(refsOf(data, "parse")).toEqual(["src/services/sync.ts:2", "src/services/sync.ts:7"]);
+    expect(data["blind_spots"]).toBe(0);
+  });
+
+  it("reports a deleted exported function as removed with its now-broken uses", async () => {
+    const r = repo();
+    r.edit("src/services/sync.ts", "export function syncAll(batches: string[][]): number {\n  let total = 0;\n  for (const batch of batches) total += runSync(batch);\n  return total;\n}\n", "");
+    const data = await impact(r);
+    expect(changed(data)[0]).toMatchObject({ symbol: "syncAll", change: "removed", exported: true, at: "src/services/sync.ts:16", refs_outside: 2 });
+    expect(refsOf(data, "syncAll")).toEqual(["src/dynamic.ts:1", "src/dynamic.ts:11"]);
+    expect(data["diagnostics"]).toBeGreaterThan(0);
+  });
+
+  it("reports added functions (tracked and untracked files) in local_only", async () => {
+    const r = repo();
+    r.edit("src/format/parse.ts", "\n}\n", "\n}\n\nexport function join(parts: string[]): string {\n  return parts.join(\",\");\n}\n");
+    r.write("src/fresh.ts", "export function brandNew(): number {\n  return 1;\n}\n");
+    const data = await impact(r);
+    expect(data["changes"]).toBe(2);
+    expect(data).not.toHaveProperty("changed");
+    expect(data["local_only"]).toBe("2 (join added; brandNew added)");
+  });
+
+  it("classifies an interface edit as type, ordered after exported signature changes", async () => {
+    const r = repo();
+    r.edit("src/models/types.ts", "createdAt: number;", "createdAt: Date;");
+    r.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    const data = await impact(r);
+    expect(changed(data).map((c) => `${c["symbol"]} ${c["change"]}`)).toEqual(["parse signature", "Entity type"]);
+    expect(refsOf(data, "Entity")).toEqual(["src/models/user.ts:1", "src/models/user.ts:5"]);
+  });
+
+  it("an import-only edit is one file-level change with no References", async () => {
+    const r = repo();
+    r.edit("src/services/sync.ts", 'import { User } from "../models";', 'import { User } from "../models/index";');
+    const data = await impact(r);
+    expect(data).toMatchObject({ changes: 1, file_level: [{ file: "src/services/sync.ts", lines: "1" }] });
+    expect(data).not.toHaveProperty("changed");
+  });
+
+  it("collapses Changes whose References are all inside the change set into local_only", async () => {
+    const r = repo();
+    r.edit("src/legacy/util.js", "return user.save();", "return user.save() && true;");
+    r.edit("src/legacy/util.js", 'legacySave("boot");', 'legacySave("boot-2");');
+    const data = await impact(r);
+    expect(data).toMatchObject({ changes: 2, local_only: "1 (legacySave body)", file_level: [{ file: "src/legacy/util.js", lines: "8" }] });
+  });
+
+  it("reads a unified diff from stdin (impact -), with and without a repo", async () => {
+    const r = repo();
+    r.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    const diff = r.git("diff", "-U0");
+    const viaStdin = async (cwd: string): Promise<Payload> => {
+      let stdout = "";
+      await main({ argv: ["impact", "-"], cwd, stdin: diff, stdout: { write: (c: string) => (stdout += c) } });
+      return toon(stdout);
+    };
+    const inRepo = await viaStdin(r.dir);
+    expect(inRepo).toMatchObject({ base: "stdin diff", changes: 1 });
+    expect(changed(inRepo)[0]).toMatchObject({ symbol: "parse", change: "signature", refs_outside: 2 });
+
+    const bare = realpathSync(mkdtempSync(join(tmpdir(), "ts-axi-nogit-")));
+    cpSync(r.dir, bare, { recursive: true, filter: (src) => !src.includes(".git") });
+    const noRepo = await viaStdin(bare);
+    expect(changed(noRepo)[0]).toMatchObject({ symbol: "parse", change: "signature" });
+    rmSync(bare, { recursive: true, force: true });
+  });
+
+  it("analyses a branch range main...<branch> and names its head", async () => {
+    const r = repo();
+    r.git("checkout", "-q", "-b", "feature");
+    r.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    r.git("commit", "-q", "-am", "change");
+    const data = await impact(r, "main...feature");
+    expect(data).toMatchObject({ head: "feature", changes: 1 });
+    expect(data["base"]).toMatch(/^[0-9a-f]{40}$/);
+    expect(data).not.toHaveProperty("warning");
+    expect(changed(data)[0]).toMatchObject({ symbol: "parse", change: "signature" });
+  });
+
+  it("--staged analyses the index only", async () => {
+    const r = repo();
+    r.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    r.git("add", "src/services/parse.ts");
+    r.edit("src/models/user.ts", "this.secret = this.id;", "this.secret = String(this.id);");
+    const data = await impact(r, "--staged");
+    expect(data).toMatchObject({ head: "index", changes: 1 });
+    expect(changed(data).map((c) => c["symbol"])).toEqual(["parse"]);
+  });
+
+  it("--grep adds unresolved textual matches that are not References", async () => {
+    const r = repo();
+    r.edit("src/services/parse.ts", "map(Number)", "map((n) => Number(n))");
+    const data = await impact(r, "--grep");
+    expect(data["unresolved"]).toEqual([{ file: "src/services/parse.ts", line: 1, context: 'import { parse as parseList } from "../format/parse";' }]);
+    expect(toon((await r.run("impact")).stdout)).not.toHaveProperty("unresolved");
+  });
+
+  it("--limit cuts ref rows across symbols and keeps exact totals", async () => {
+    const r = repo();
+    r.edit("src/models/user.ts", "this.secret = this.id;", "this.secret = String(this.id);");
+    r.edit("src/services/parse.ts", "map(Number)", "map((n) => Number(n))");
+    r.edit("src/services/sync.ts", "return list.filter", "return list.slice().filter");
+    const data = await impact(r, "--limit", "3");
+    const rows = data["refs"] as Rows;
+    expect(rows).toHaveLength(3);
+    expect(new Set(rows.map((x) => x["symbol"])).size).toBe(3);
+    const total = changed(data).reduce((n, c) => n + (c["refs_outside"] as number), 0);
+    expect(data).toMatchObject({ truncated: true, refs_shown: 3, refs_outside_total: total });
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining(`ts-axi impact --limit ${total}`)]));
+  });
+
+  it("--depth 2 adds callers_depth2 counts per file", async () => {
+    const r = repo();
+    r.edit("src/models/user.ts", "this.secret = this.id;", "this.secret = String(this.id);");
+    const data = await impact(r, "--depth", "2");
+    expect(data["callers_depth2"]).toEqual(
+      expect.arrayContaining([{ file: "src/services/sync.ts", count: 1 }, { file: "src/legacy/util.js", count: 1 }]),
+    );
+  });
+
+  it("--json prints the same payload as JSON", async () => {
+    const r = repo();
+    r.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    const data = JSON.parse((await r.run("impact", "--json")).stdout) as Payload;
+    expect(data).toMatchObject({ changes: 1, blind_spots: 0 });
+    expect(changed(data)[0]).toMatchObject({ change: "signature" });
+    expect(data["help"]).toEqual(expect.any(Array));
+  });
+
+  it("a clean tree is a definitive changes: 0", async () => {
+    const data = await impact(repo());
+    expect(data).toMatchObject({ changes: 0 });
+  });
+
+  it("outside a git repo without stdin is GIT_ERROR (exit 3) pointing at impact -", async () => {
+    const bare = realpathSync(mkdtempSync(join(tmpdir(), "ts-axi-nogit-")));
+    cpSync(FIXTURE, bare, { recursive: true });
+    const { stdout, exitCode } = await runner(bare)("impact");
+    expect(exitCode).toBe(3);
+    expect(toon(stdout)).toMatchObject({ code: "GIT_ERROR" });
+    expect(stdout).toContain("ts-axi impact -");
+    rmSync(bare, { recursive: true, force: true });
+  });
+
+  it("rejects --staged with a range", async () => {
+    expect((await repo().run("impact", "HEAD", "--staged")).exitCode).toBe(2);
   });
 });

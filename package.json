@@ -27,6 +27,7 @@
     "build:skill": "tsx scripts/build-skill.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "pnpm run build && vitest run -c vitest.integration.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build && pnpm run build:skill -- --check",
     "dev": "tsx bin/ts-axi.ts",
