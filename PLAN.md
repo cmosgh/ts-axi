@@ -59,7 +59,7 @@ Input, all normalised to `{ file → changed line ranges (after), file → chang
 - `impact` → working tree vs `HEAD` (staged + unstaged); `impact --staged` → index vs HEAD.
 - `impact <range>` → any `git diff` range: `main...HEAD`, `abc123`, `v1..v2`.
 - `impact -` → unified diff on stdin (e.g. `bb-axi pr diff 42 --raw | ts-axi impact -`). Paths are taken relative to the repo root (`a/`, `b/` prefixes stripped).
-- `git` via `child_process` only. Not a git repo and no stdin diff → `GIT_ERROR` (exit 3) with the `impact -` alternative.
+- `git` via `child_process` only. Not a git repo and no stdin diff → `GIT_ERROR` (exit 1) with the `impact -` alternative.
 
 Before-version: `git show <base>:<path>` read in memory for touched files only; parsed syntactically to find the before-Declarations and Signatures. With stdin input and no repo, the before Signature is rebuilt from the `-` lines of the hunk when the whole declaration header is present; otherwise the change class is `modified`.
 
@@ -112,7 +112,7 @@ Located at the git root (or cwd when not a repo). Unknown keys → `VALIDATION_E
 - Numbers stay numbers. Paths are repo-root-relative with `/`. No commas, colons or double quotes in TOON string values where avoidable (signatures may contain them: they are quoted by the encoder, accepted).
 - Every result ends with a `help` block of concrete next commands with real values filled in (`ts-axi refs src/a.ts:42`, `ts-axi def User.save`).
 - Empty states are definitive: `matches: 0`, `refs_total: 0`, `changes: 0`, exit 0.
-- Exit codes: 0 ok/empty, 2 usage or validation, 1 internal failure (`UNKNOWN`), 3 not a git repo / git failure (`GIT_ERROR`).
+- Exit codes: 0 ok/empty, 2 usage or validation, 1 internal failure (`UNKNOWN`) or git failure (`GIT_ERROR`).
 
 ## Tests
 

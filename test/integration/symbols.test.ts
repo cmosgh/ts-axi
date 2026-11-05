@@ -70,7 +70,7 @@ describe("config", () => {
 
 describe("outline", () => {
   it("lists the 8 Declarations of src/lib/cart.ts with kinds and lines", async () => {
-    const data = await toon("outline", "src/lib/cart.ts");
+    const data = await toon("outline", "src/lib/cart.ts", "--fields", "exported");
     expect(data["file"]).toBe("src/lib/cart.ts");
     const decls = rowsOf(data, "decls");
     expect(decls.map((d) => [d["line"], d["kind"], d["name"], d["exported"]])).toEqual([
@@ -94,9 +94,9 @@ describe("def", () => {
     const data = decodeToon(stdout);
     expect(data["symbol"]).toBe("parse");
     const matches = rowsOf(data, "matches");
-    expect(matches.map((m) => [m["file"], m["line"], m["kind"], m["exported"]])).toEqual([
-      ["src/lib/parse.ts", 1, "function", true],
-      ["src/lib/query.ts", 1, "function", true],
+    expect(matches.map((m) => [m["at"], m["kind"], String(m["signature"]).startsWith("export ")])).toEqual([
+      ["src/lib/parse.ts:1", "function", true],
+      ["src/lib/query.ts:1", "function", true],
     ]);
     expect(stdout).toContain("ts-axi def src/lib/parse.ts:1");
     expect(stdout).toContain("ts-axi def src/lib/query.ts:1");
@@ -222,7 +222,7 @@ describe("callers", () => {
 
 describe("components and hooks", () => {
   it("outlines ProductCard.tsx: an exported interface and function component", async () => {
-    const data = await toon("outline", "src/components/ProductCard.tsx");
+    const data = await toon("outline", "src/components/ProductCard.tsx", "--fields", "exported");
     const decls = rowsOf(data, "decls");
     expect(decls.map((d) => [d["line"], d["kind"], d["name"], d["exported"]])).toEqual([
       [3, "interface", "ProductCardProps", true],
@@ -232,7 +232,7 @@ describe("components and hooks", () => {
   });
 
   it("marks the unexported prop type alias of CartBadge as not exported", async () => {
-    const decls = rowsOf(await toon("outline", "src/components/CartBadge.tsx"), "decls");
+    const decls = rowsOf(await toon("outline", "src/components/CartBadge.tsx", "--fields", "exported"), "decls");
     expect(decls.map((d) => [d["line"], d["kind"], d["name"], d["exported"]])).toEqual([
       [4, "type", "CartBadgeProps", false],
       [6, "function", "CartBadge", true],

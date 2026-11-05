@@ -44,18 +44,20 @@ describe("outline", () => {
       "User.create",
       "isAdmin",
     ]);
-    expect(decls.find((d) => d["name"] === "User.secret")).toMatchObject({ kind: "property", exported: false });
-    expect(decls.find((d) => d["name"] === "User.save")).toMatchObject({ line: 13, kind: "method", exported: true, signature: "save(): boolean" });
+    expect(decls.find((d) => d["name"] === "User.save")).toEqual({ line: 13, kind: "method", name: "User.save", signature: "save(): boolean" });
+    const withExported = toon((await run("outline", "src/models/user.ts", "--fields", "exported")).stdout)["decls"] as Payload[];
+    expect(withExported.find((d) => d["name"] === "User.secret")).toMatchObject({ kind: "property", exported: false });
+    expect(withExported.find((d) => d["name"] === "User.save")).toMatchObject({ exported: true });
     expect(stdout).toContain("ts-axi def src/models/user.ts:5");
   });
 
-  it("--exported over a glob adds the file column and drops private members", async () => {
-    const data = toon((await run("outline", "src/models/*.ts", "--exported")).stdout);
+  it("--exported over a glob adds an at column and drops private members", async () => {
+    const data = toon((await run("outline", "src/models/*.ts", "--exported", "--fields", "exported")).stdout);
     const decls = data["decls"] as Payload[];
     expect(data["files"]).toBe(3);
     expect(decls.every((d) => d["exported"] === true)).toBe(true);
     expect(decls.some((d) => d["name"] === "User.secret")).toBe(false);
-    expect(decls.find((d) => d["name"] === "Role")).toMatchObject({ file: "src/models/types.ts", kind: "enum" });
+    expect(decls.find((d) => d["name"] === "Role")).toMatchObject({ at: expect.stringMatching(/^src\/models\/types\.ts:\d+$/), kind: "enum" });
     expect(decls.find((d) => d["name"] === "UserId")).toMatchObject({ kind: "type", signature: "export type UserId = string" });
   });
 
@@ -90,8 +92,8 @@ describe("def", () => {
     expect(exitCode).toBe(0);
     const data = toon(stdout);
     expect(data["matches"]).toEqual([
-      { file: "src/format/parse.ts", line: 1, kind: "function", exported: true, signature: "export function parse(input: string): string[]" },
-      { file: "src/services/parse.ts", line: 3, kind: "function", exported: true, signature: "export function parse(raw: string): number[]" },
+      { at: "src/format/parse.ts:1", kind: "function", signature: "export function parse(input: string): string[]" },
+      { at: "src/services/parse.ts:3", kind: "function", signature: "export function parse(raw: string): number[]" },
     ]);
     expect(stdout).toContain("ts-axi def src/format/parse.ts:1");
     expect(stdout).toContain("ts-axi def parse --kind function --in src/format");
@@ -370,8 +372,9 @@ describe("impact", () => {
     };
   }
 
+  // These tests check every column, so they ask for all of them.
   async function impact(r: ReturnType<typeof repo>, ...argv: string[]): Promise<Payload> {
-    const { stdout, exitCode } = await r.run("impact", ...argv);
+    const { stdout, exitCode } = await r.run("impact", ...argv, ...(argv.includes("--fields") ? [] : ["--fields", "all"]));
     expect(exitCode).toBe(0);
     return toon(stdout);
   }
@@ -392,6 +395,33 @@ describe("impact", () => {
     expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi refs src/models/user.ts:13")]));
   });
 
+  it("defaults changed rows to four columns and adds --fields columns in their documented place", async () => {
+    const r = repo();
+    r.edit("src/models/user.ts", "this.secret = this.id;", "this.secret = `${this.id}`;");
+    const plain = toon((await r.run("impact")).stdout);
+    expect(changed(plain)).toEqual([{ symbol: "User.save", change: "body", at: "src/models/user.ts:13", refs_outside: 2 }]);
+    expect(plain["help"]).toEqual(expect.arrayContaining(["Run `ts-axi impact --fields files,tests` for how many files and Test files reference each Symbol"]));
+    const some = toon((await r.run("impact", "--fields", "Tests,kind")).stdout);
+    expect(Object.keys(changed(some)[0]!)).toEqual(["symbol", "kind", "change", "at", "refs_outside", "tests"]);
+    expect(some["help"]).not.toEqual(expect.arrayContaining([expect.stringContaining("--fields files,tests")]));
+    // --fields all is the downstream contract: the pre-0.1.10 row, column for column.
+    const all = toon((await r.run("impact", "--fields", "all")).stdout);
+    expect(Object.keys(changed(all)[0]!)).toEqual(["symbol", "kind", "change", "exported", "at", "refs_total", "refs_outside", "via", "files", "tests"]);
+    // Hints replay every given flag, --fields normalised.
+    const flagged = toon((await r.run("impact", "--test-glob", "src/services/**", "--via", "--fields", "Tests, kind")).stdout);
+    expect(flagged["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi impact --via --test-glob 'src/services/**' --fields kind,tests --depth 2")]));
+    const bad = await r.run("impact", "--fields", "owner");
+    expect(bad.exitCode).toBe(2);
+    expect(bad.stdout).toContain("available --fields: kind, exported, refs_total, via, files, tests (or all)");
+  });
+
+  it("names a missing revision and how to pick one", async () => {
+    const { stdout, exitCode } = await repo().run("impact", "no-such-rev...HEAD");
+    expect(exitCode).toBe(1);
+    expect(toon(stdout)).toMatchObject({ code: "GIT_ERROR" });
+    expect(stdout).toContain("git log --oneline -5");
+  });
+
   it("puts the any access and the string key in src/dynamic.ts in blind_spots", async () => {
     const r = repo();
     r.edit("src/models/user.ts", "this.secret = this.id;", "this.secret = String(this.id);");
@@ -400,7 +430,7 @@ describe("impact", () => {
       { symbol: "User.save", file: "src/dynamic.ts", line: 4, reason: "property access on any" },
       { symbol: "User.save", file: "src/dynamic.ts", line: 5, reason: "string key 'save' on a type without that member" },
     ]);
-    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi impact --grep")]));
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi impact --fields all --grep")]));
   });
 
   it("classifies a parameter change as signature and flags tests: 0", async () => {
@@ -519,7 +549,7 @@ describe("impact", () => {
     expect(new Set(rows.map((x) => x["symbol"])).size).toBe(3);
     const total = changed(data).reduce((n, c) => n + (c["refs_outside"] as number), 0);
     expect(data).toMatchObject({ truncated: true, refs_shown: 3, refs_outside_total: total });
-    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining(`ts-axi impact --limit ${total}`)]));
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining(`ts-axi impact --fields all --limit ${total}`)]));
   });
 
   it("--depth 2 adds callers_depth2 counts per file", async () => {
@@ -549,7 +579,7 @@ describe("impact", () => {
     ]);
     expect(refsOf(data, "DateParser.parse")).toEqual(["src/services/dates.ts:4"]);
     expect(data).not.toHaveProperty("notes");
-    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi impact --via")]));
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi impact --fields all --via")]));
     const withVia = await impact(r, "--via");
     expect((withVia["refs"] as Rows).map((x) => `${x["file"]}:${x["line"]}:${x["via"]}`)).toEqual([
       "src/parsers/registry.ts:5:FieldParser.parse",
@@ -584,11 +614,11 @@ describe("impact", () => {
     expect(data).toMatchObject({ changes: 0 });
   });
 
-  it("outside a git repo without stdin is GIT_ERROR (exit 3) pointing at impact -", async () => {
+  it("outside a git repo without stdin is GIT_ERROR (exit 1) pointing at impact -", async () => {
     const bare = realpathSync(mkdtempSync(join(tmpdir(), "ts-axi-nogit-")));
     cpSync(FIXTURE, bare, { recursive: true });
     const { stdout, exitCode } = await runner(bare)("impact");
-    expect(exitCode).toBe(3);
+    expect(exitCode).toBe(1);
     expect(toon(stdout)).toMatchObject({ code: "GIT_ERROR" });
     expect(stdout).toContain("ts-axi impact -");
     rmSync(bare, { recursive: true, force: true });
@@ -697,7 +727,7 @@ describe("impact", () => {
         expect.objectContaining({ symbol: "app.render", change: "body", refs_outside: 1, textual: 4, tests: 0 }),
       ]);
       expect(data["help"]).toEqual(
-        expect.arrayContaining(["Run `ts-axi impact --grep` for the 3 textual matches the checker cannot resolve (untyped JavaScript)"]),
+        expect.arrayContaining(["Run `ts-axi impact --fields all --grep` for the 3 textual matches the checker cannot resolve (untyped JavaScript)"]),
       );
     });
 
@@ -765,7 +795,7 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(await names("lib/ledger.js")).toEqual(["1 function Ledger", "4 method Ledger.reset", "9 method Ledger.add", "14 method Ledger.fromJSON"]);
     expect(await names("lib/format.js")).toEqual(["2 function pad", "8 function stamp"]);
     expect(await names("lib/totals.js")).toEqual(["1 variable TAX", "4 method exports.gross", "7 method exports.net", "12 method exports.round"]);
-    const app = toon((await legacy("outline", "client/app.js")).stdout)["decls"] as Payload[];
+    const app = toon((await legacy("outline", "client/app.js", "--fields", "exported")).stdout)["decls"] as Payload[];
     expect(app[0]).toMatchObject({ exported: true, signature: "controller CartCtrl($scope, priceService)" });
   });
 
@@ -992,7 +1022,7 @@ describe("workspace (Nx + pnpm fixture)", () => {
   it("impact of a body edit lists References across both services and the app", async () => {
     const r = workspace();
     r.edit("libs/shared/src/lib/money.ts", "money.cents / 100", "Math.trunc(money.cents) / 100");
-    const data = toon((await r.run("impact")).stdout);
+    const data = toon((await r.run("impact", "--fields", "all")).stdout);
     expect(data["changed"]).toEqual([
       expect.objectContaining({ symbol: "formatMoney", change: "body", exported: true, files: 4, tests: 1 }),
     ]);

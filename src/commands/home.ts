@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { expectPositionals, flag, flags, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
-import { usageError } from "../errors.js";
+import { AxiError, usageError } from "../errors.js";
 import { currentBranch, dirtyFileCount, isGitRepo } from "../git.js";
 import { block, helpBlock, out } from "../render.js";
 import { SETTINGS_FILE, isTestFile, loadSettings, readSettingsFile, type Settings } from "../settings.js";
@@ -104,12 +104,26 @@ export async function homeCommand(args: string[], ctx?: CommandContext): Promise
   expectPositionals(parsed, 0, "ts-axi [-P <tsconfig>] [--test-glob <glob>]");
   const cwd = ctx?.cwd ?? process.cwd();
   const project = flag(parsed, "--project");
-  const settings = loadSettings(cwd, {
-    testGlobs: flags(parsed, "--test-glob"),
-    ...(project !== undefined ? { project } : {}),
-  });
-
-  const tsconfig = resolveTsconfig(cwd, settings);
+  const overrides = { testGlobs: flags(parsed, "--test-glob"), ...(project !== undefined ? { project } : {}) };
+  // A broken .ts-axi.json must not fail the session-start view: report it and carry on without the file.
+  let broken: string | undefined;
+  let settings: Settings;
+  try {
+    settings = loadSettings(cwd, overrides);
+  } catch (error) {
+    if (!(error instanceof AxiError)) throw error;
+    broken = error.message;
+    settings = loadSettings(cwd, { ...overrides, ignoreFile: true });
+  }
+  let tsconfig: string | undefined;
+  try {
+    tsconfig = resolveTsconfig(cwd, settings);
+  } catch (error) {
+    if (!(error instanceof AxiError) || settings.sources.project !== SETTINGS_FILE) throw error;
+    broken = error.message;
+    settings = loadSettings(cwd, { ...overrides, ignoreFile: true });
+    tsconfig = resolveTsconfig(cwd, settings);
+  }
   // Same rule as the semantic commands: no explicit project + a multi-project workspace = workspace scope.
   let workspace: Workspace | undefined;
   if (settings.project === undefined && (tsconfig === undefined || hasMultiProjectSignal(settings.root))) {
@@ -134,17 +148,19 @@ export async function homeCommand(args: string[], ctx?: CommandContext): Promise
   ]);
   const testFiles = counted.files.filter((f) => isTestFile(rel(settings.root, f), settings)).length;
   const plus = counted.capped ? "+" : "";
-  const present = readSettingsFile(settings.root) !== undefined;
+  const present = broken === undefined && readSettingsFile(settings.root) !== undefined;
 
   const onDefaultBranch = git.branch === undefined || git.branch === "main" || git.branch === "master";
   const help: string[] = [];
-  if (git.dirty > 0 || !onDefaultBranch) {
+  if (broken !== undefined) help.push(`Fix or delete ${SETTINGS_FILE} - def, refs, callers, impact and config refuse to run until then (outline still works)`);
+  if (broken === undefined && (git.dirty > 0 || !onDefaultBranch)) {
     help.push("Run `ts-axi impact` to see which other code your changes affect");
   }
   help.push(
     "Run `ts-axi outline <file>` to list the declarations in a file",
-    "Run `ts-axi def <name>` to find where a symbol is declared",
-    "Run `ts-axi config` to see or change the test-file globs",
+    ...(broken === undefined
+      ? ["Run `ts-axi def <name>` to find where a symbol is declared", "Run `ts-axi config` to see or change the test-file globs"]
+      : []),
     "Run `ts-axi --help` for all commands",
   );
 
@@ -161,7 +177,7 @@ export async function homeCommand(args: string[], ctx?: CommandContext): Promise
       test_globs: settings.testGlobs.length,
       test_files: counted.capped ? `${testFiles}${plus}` : testFiles,
       git: git.text,
-      settings: `${SETTINGS_FILE} (${present ? "present" : "absent"})`,
+      settings: broken !== undefined ? `${SETTINGS_FILE} (ignored - ${/not valid JSON/.test(broken) ? "not valid JSON" : broken.replace(`${SETTINGS_FILE} `, "")})` : `${SETTINGS_FILE} (${present ? "present" : "absent"})`,
     }),
     helpBlock(help),
   );

@@ -6,11 +6,11 @@ export type ErrorCode =
   | "VALIDATION_ERROR"
   | "NOT_FOUND"
   | "GIT_ERROR"
+  | "SETUP_FAILED"
   | "UNKNOWN";
 
-/** SDK mapping (2 usage, 1 otherwise) plus `GIT_ERROR` → 3. */
+/** SDK mapping: 2 for usage errors, 1 otherwise (`GIT_ERROR` included). */
 export function exitCodeForError(error: unknown): number {
-  if (error instanceof AxiError && error.code === "GIT_ERROR") return 3;
   return sdkExitCode(error);
 }
 

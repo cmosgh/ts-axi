@@ -25,8 +25,9 @@ function edit(rel: string, from: string, to: string): void {
   sample.write(rel, text.replace(from, to));
 }
 
+// These tests check every changed[n] column, so they ask for all of them.
 async function impact(...argv: string[]): Promise<Payload> {
-  const { stdout, exitCode } = await sample.run("impact", ...argv);
+  const { stdout, exitCode } = await sample.run("impact", ...argv, ...(argv.includes("--fields") ? [] : ["--fields", "all"]));
   expect(exitCode).toBe(0);
   return decodeToon(stdout);
 }

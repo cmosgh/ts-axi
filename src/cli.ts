@@ -5,6 +5,7 @@ import { homeCommand } from "./commands/home.js";
 import { impactCommand, IMPACT_HELP } from "./commands/impact.js";
 import { outlineCommand, OUTLINE_HELP } from "./commands/outline.js";
 import { callersCommand, CALLERS_HELP, refsCommand, REFS_HELP } from "./commands/refs.js";
+import { setupCommand, SETUP_HELP } from "./commands/setup.js";
 import type { CommandContext } from "./context.js";
 import { AxiError, exitCodeForError } from "./errors.js";
 import { renderErrorOutput, setJsonMode, toJson } from "./render.js";
@@ -14,8 +15,8 @@ export const DESCRIPTION =
   "TypeScript/JavaScript symbol CLI for agents - definitions, references, callers, file outlines and change impact (what a diff affects) from the TypeScript compiler. Prefer it over grep for 'who uses this'.";
 
 export const TOP_HELP = `usage: ts-axi [command] [args] [flags]
-commands[7]:
-  (none)=project overview, def, refs, callers, outline, impact, config
+commands[8]:
+  (none)=project overview, def, refs, callers, outline, impact, config, setup (opt-in session hooks)
 targets:
   name (save), member (User.save) or position (src/a.ts:42 or src/a.ts:42:7)
 flags[4]:
@@ -37,6 +38,7 @@ const COMMAND_HELP: Record<string, string> = {
   outline: OUTLINE_HELP,
   impact: IMPACT_HELP,
   config: CONFIG_HELP,
+  setup: SETUP_HELP,
 };
 
 type Handler = (args: string[], ctx: CommandContext) => Promise<string>;
@@ -90,11 +92,12 @@ export async function main(options: MainOptions = {}): Promise<void> {
         outline: command("outline", outlineCommand, ctx),
         impact: command("impact", impactCommand, ctx),
         config: command("config", configCommand, ctx),
+        setup: command("setup", (args) => setupCommand(args), ctx),
       },
       getCommandHelp: (name) => COMMAND_HELP[name],
       renderUnknownCommand: (name) =>
         `${renderErrorOutput(`unknown command '${name}'`, "VALIDATION_ERROR", [
-          "commands: def, refs, callers, outline, impact, config (no command = project overview)",
+          "commands: def, refs, callers, outline, impact, config, setup (no command = project overview)",
           "Run `ts-axi --help` for examples",
         ])}\n`,
       formatError,

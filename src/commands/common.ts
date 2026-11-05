@@ -143,11 +143,10 @@ export const MATCH_ROWS = 20;
 
 /** `matches` (first MATCH_ROWS, shallowest first) plus `matches_total` / `truncated` past that. */
 export function matchRows(groups: SymbolGroup[]): Record<string, unknown> {
+  // `at` pastes into `ts-axi def`; TS signatures carry `export`, and `--exported` narrows to exported ones.
   const rows = groups.slice(0, MATCH_ROWS).map((g) => ({
-    file: g.primary.file,
-    line: g.decls[0]!.nameLine,
+    at: positionOf(g),
     kind: g.primary.kind,
-    exported: g.primary.exported,
     signature: g.decls[0]!.signature,
   }));
   return { matches: rows, ...(groups.length > MATCH_ROWS ? { matches_total: groups.length, truncated: true } : {}) };
