@@ -11,9 +11,9 @@ $ ts-axi impact main...HEAD
 base: 923fb4d7ddc8f4e5c4df9029be388f8cb29ce095
 head: HEAD
 changes: 2
-changed[2]{symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}:
-  formatPrice,function,signature,true,"src/lib/format.ts:5",13,12,0,6,2
-  Cart.total,method,body,true,"src/lib/cart.ts:32",8,8,0,5,3
+changed[2]{symbol,change,at,refs_outside}:
+  formatPrice,signature,"src/lib/format.ts:5",12
+  Cart.total,body,"src/lib/cart.ts:32",8
 refs[20]{symbol,file,line,context}:
   formatPrice,src/components/Counter.tsx,2,"import { formatPrice } from '../lib';"
   formatPrice,src/components/Counter.tsx,12,"{cups} cups = {formatPrice(cups * CUP_CENTS)}"
@@ -25,17 +25,18 @@ refs[20]{symbol,file,line,context}:
 blind_spots[1]{symbol,file,line,reason}:
   Cart.total,src/components/CartSummary.tsx,16,string key 'total' on a type without that member
 elapsed_ms: 679
-help[5]:
+help[6]:
   - "Run `ts-axi refs src/lib/format.ts:5` for every Reference of formatPrice"
   - "Run `ts-axi callers src/lib/format.ts:5` for its call sites with the enclosing function"
   - "Run `ts-axi def src/lib/format.ts:5` for the changed declaration"
+  - Run `ts-axi impact main...HEAD --fields files,tests` for how many files and Test files reference each Symbol
   - Run `ts-axi impact main...HEAD --grep` for textual matches the checker cannot see
   - Run `ts-axi impact main...HEAD --depth 2` for who calls the callers
 ```
 
-(`...` marks rows cut from this README; the command prints all 20.)
+(`...` marks rows cut from this README; the command prints all 20. `--fields all` restores the full row: `{symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}`.)
 
-Read-only: no lint, no refactor, no rename.
+Read-only on your code: no lint, no refactor, no rename. The only files it writes are `.ts-axi.json` (`config set`) and, when you ask for it, your agents' hook config (`setup hooks`).
 
 ## Status (v0.1.4)
 
@@ -63,11 +64,14 @@ Then tell your agent about it - one line in `CLAUDE.md` / `AGENTS.md`:
 Use `ts-axi` to find definitions, references and callers in TypeScript/JavaScript code, and `ts-axi impact` to see what a diff affects before reviewing it.
 ```
 
-Or install the on-demand Agent Skill (no per-session cost):
+Or install one of the two integrations (you only need one):
 
 ```sh
-npx skills add cmosgh/ts-axi --skill ts-axi
+ts-axi setup hooks                           # SessionStart hook: the project overview as ambient context (Claude Code, Codex, OpenCode)
+npx skills add cmosgh/ts-axi --skill ts-axi  # on-demand Agent Skill, no per-session cost
 ```
+
+The hook runs `ts-axi` with no arguments: it reads only the file tree and git status (no compiler run, no network) and exits 0 in any directory. `ts-axi setup hooks --project` installs it for the current repository only, `ts-axi setup status` shows what is installed, and `ts-axi setup uninstall` removes only ts-axi's own entries.
 
 ## Commands
 
@@ -77,9 +81,10 @@ npx skills add cmosgh/ts-axi --skill ts-axi
 | `def <target>` | Declarations of a symbol by name (`save`, `User.save`, `path:line`): one match prints detail and body, several print a compact list, none prints `did_you_mean` |
 | `refs <target>` | References of one symbol, grouped by file, with test counts. A class member that implements an interface (or overrides a base) member counts only its direct References; calls through the interface are `via_interface: n (Iface.member)`, sibling implementations are dropped, and an interface member reports `implementations: n`. `--limit`, `--kind calls`, `--via` (via rows with a `via` column), `--implementations` |
 | `callers <target>` | Incoming calls of a function-like symbol, split the same way (`via_interface`, `--via`). `--depth 1..3` |
-| `outline <file>` | Top-level declarations in source order, class members nested. `--exports` |
-| `impact [<git-range> \| -]` | Declarations changed by the working tree (untracked files included; `--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), riskiest first: change class (`signature`, `removed`, `type`, `added`, `body`, `modified`), References outside the change set (direct only), a `via` count of calls through an interface or base member (`--via` lists them), test-file counts, `notes` (a signature change of a member that implements an interface member), `blind_spots`, `local_only`, `file_level` and `skipped` (non-TS files in the diff). `--limit`, `--depth 2..3`, `--grep`. Analyses the current checkout |
+| `outline <file>` | Top-level declarations in source order, class members nested: `{line,kind,name,signature}` (`{at,kind,name,signature}` over several files). `--exports`, `--fields exported` |
+| `impact [<git-range> \| -]` | Declarations changed by the working tree (untracked files included; `--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), riskiest first: change class (`signature`, `removed`, `type`, `added`, `body`, `modified`), References outside the change set (direct only), a `via` count of calls through an interface or base member (`--via` lists them), test-file counts, `notes` (a signature change of a member that implements an interface member), `blind_spots`, `local_only`, `file_level` and `skipped` (non-TS files in the diff). `--limit`, `--depth 2..3`, `--grep`. Rows default to `{symbol,change,at,refs_outside}`; `--fields kind,exported,refs_total,via,files,tests` (or `all`) adds columns. Analyses the current checkout |
 | `config` | Show effective settings with their source; `config set <key> <value>` and `config unset <key>` write `.ts-axi.json` |
+| `setup <hooks\|status\|uninstall>` | Opt-in SessionStart hook for Claude Code, Codex and OpenCode that runs the home view at session start. `--project` for the current repository only |
 
 `ts-axi <command> --help` prints a concise, complete flag reference. `-P <tsconfig>` selects a project on any command that may analyse types; `--json` prints the decoded payload.
 
@@ -135,9 +140,9 @@ The line numbers in front of the body are file lines, so an agent can cite or co
 ```
 $ ts-axi def parse
 symbol: parse
-matches[2]{file,line,kind,exported,signature}:
-  src/lib/parse.ts,1,function,true,"export function parse(input: string): number"
-  src/lib/query.ts,1,function,true,"export function parse(q: string): Record<string, string>"
+matches[2]{at,kind,signature}:
+  "src/lib/parse.ts:1",function,"export function parse(input: string): number"
+  "src/lib/query.ts:1",function,"export function parse(q: string): Record<string, string>"
 help[4]:
   - "Run `ts-axi def src/lib/parse.ts:1` for the one in src/lib/parse.ts"
   - "Run `ts-axi def src/lib/query.ts:1` for the one in src/lib/query.ts"
@@ -167,7 +172,7 @@ refs[1]{file,line,context}:
 ### Script-style JavaScript
 
 ```
-$ ts-axi outline client/app.js
+$ ts-axi outline client/app.js --fields exported
 decls[4]{line,kind,name,exported,signature}:
   6,function,CartCtrl,true,"controller CartCtrl($scope, priceService)"
   12,function,priceService,true,service priceService()

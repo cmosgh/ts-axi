@@ -39,6 +39,8 @@ export interface SettingsOverrides {
   testGlobs?: string[];
   /** `-P <tsconfig>`. */
   project?: string;
+  /** Skip `.ts-axi.json`: the home view still renders when the file is broken. */
+  ignoreFile?: boolean;
 }
 
 /** Contents of `.ts-axi.json`; every key optional. */
@@ -111,7 +113,7 @@ export function writeSettingsFile(root: string, data: SettingsFile): void {
 
 export function loadSettings(cwd: string, overrides: SettingsOverrides = {}): Settings {
   const root = findRoot(cwd);
-  const file = readSettingsFile(root);
+  const file = overrides.ignoreFile ? undefined : readSettingsFile(root);
 
   const fileGlobs = file?.testGlobs ?? [];
   // An empty list cannot replace the defaults: that would turn every file into a non-test.

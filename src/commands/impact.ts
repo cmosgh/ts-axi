@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import ts from "typescript";
-import { bool, intFlag, parseArgs, type ParsedArgs, flag } from "../args.js";
+import { bool, flag, intFlag, parseArgs, parseFields, type ParsedArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { changedRanges, parseUnifiedDiff, type FileDiff, type Range } from "../diff.js";
 import { AxiError, usageError } from "../errors.js";
@@ -40,10 +40,10 @@ input:
   (none) = working tree vs HEAD (staged + unstaged + untracked); --staged = index vs HEAD
   <git-range> = any git diff range (main...HEAD, abc123, v1..v2); - = unified diff on stdin (needs the after side checked out)
   analysis is of the current checkout - for a range whose head is not the working tree, check that head out first
-flags[7]:
-  --staged, --via (adds References through an interface or base member to refs[n] with a via column), --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), -P <tsconfig>, --json
+flags[8]:
+  --staged, --via (adds References through an interface or base member to refs[n] with a via column), --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), --fields <kind,exported,refs_total,via,files,tests|all> (extra changed[n] columns), -P <tsconfig>, --json
 output:
-  base, head, changes (count), changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}
+  base, head, changes (count), changed[n]{symbol,change,at,refs_outside} by default; --fields adds columns in place, --fields all gives {symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}
   change = signature | removed | type | added | body | modified (before unavailable) - riskiest first
   textual = column added only when an untyped (JavaScript; implicit project) Symbol has more whole-word matches outside the change set than refs_outside - those are uses the checker cannot resolve (declaring file only for a non-exported local); - for typed rows; such a Change is never local_only
   refs_* / files / tests count direct References only; via = References outside the change set that reach the Symbol through an interface or base member it implements (or name an override of it) - they MAY call it
@@ -54,7 +54,7 @@ output:
   templates = column added only when a changed Symbol is one templates name (directive, component, binding, controller, filter): its usages in .html/.htm/.ejs/.hbs/.njk/.pug files; - for other rows; such a Change is never local_only
   template_changes[n]{file,symbols} = templates in the diff that use a changed directive, binding, controller or filter - review them with that change
   skipped[n]{file,reason} = files in the diff that were not analysed (.astro, .json, outside the Project)
-  tests: 0 on an exported signature or body change = no Test file references it
+  tests: 0 on an exported signature or body change = no Test file references it (columns from --fields exported,tests)
   scope = in a monorepo without -P the program is the touched files + two levels of importers (scope_partial: true when capped)
 examples[5]:
   ts-axi impact
@@ -71,8 +71,13 @@ const SPECS = [
   { name: "--limit" },
   { name: "--grep", boolean: true },
   { name: "--test-glob", repeatable: true },
+  { name: "--fields" },
   { name: "-P" },
 ];
+
+// Opt-in columns of changed[n]; the default keeps symbol, change, at, refs_outside.
+const IMPACT_FIELDS = ["kind", "exported", "refs_total", "via", "files", "tests"] as const;
+const OPT_IN = new Set<string>(IMPACT_FIELDS);
 
 interface Input {
   base: string;
@@ -459,12 +464,27 @@ function capped<T>(key: string, rows: T[]): Record<string, unknown> {
   };
 }
 
+/** Quotes a value for a pasteable command. */
+function shellWord(value: string): string {
+  return /^[\w@%+=:,.\/-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** The same `impact` invocation with every given flag replayed, the one `extra` sets replaced by it. */
 function rerun(arg: string | undefined, parsed: ParsedArgs, extra: string): string {
   const parts = ["ts-axi impact"];
-  if (arg !== undefined) parts.push(arg);
-  if (bool(parsed, "--staged")) parts.push("--staged");
-  const project = flag(parsed, "-P");
-  if (project) parts.push(`-P ${project}`);
+  if (arg !== undefined) parts.push(shellWord(arg));
+  const replaced = extra.split(" ")[0];
+  for (const spec of SPECS) {
+    if (spec.name === replaced) continue;
+    if ("boolean" in spec) {
+      if (bool(parsed, spec.name)) parts.push(spec.name);
+    } else if (spec.name === "--fields") {
+      const fields = parseFields(flag(parsed, "--fields"), IMPACT_FIELDS);
+      if (fields.length > 0) parts.push(`--fields ${fields.length === IMPACT_FIELDS.length ? "all" : fields.join(",")}`);
+    } else {
+      for (const value of parsed.values.get(spec.name) ?? []) parts.push(`${spec.name} ${shellWord(value)}`);
+    }
+  }
   parts.push(extra);
   return `${arg === "-" ? "<diff> | " : ""}${parts.join(" ")}`;
 }
@@ -505,6 +525,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   const arg = parsed.positionals[0];
   const staged = bool(parsed, "--staged");
   if (staged && arg !== undefined) throw usageError("--staged cannot be combined with a range or -", ["Run `ts-axi impact --staged` alone"]);
+  const extras = new Set<string>(parseFields(flag(parsed, "--fields"), IMPACT_FIELDS));
   const limit = intFlag(parsed, "--limit", DEFAULT_LIMIT, { min: 1, max: MAX_LIMIT });
   const depth = intFlag(parsed, "--depth", 1, { min: 1, max: 3 });
   const grep = bool(parsed, "--grep");
@@ -737,6 +758,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     if (isFunctionLike(top.kind)) help.push(`Run \`ts-axi callers ${top.at}\` for its call sites with the enclosing function`);
     help.push(`Run \`ts-axi def ${top.at}\` for the changed declaration`);
   }
+  if (listed.length > 0 && extras.size === 0) help.push(`Run \`${rerun(arg, parsed, "--fields files,tests")}\` for how many files and Test files reference each Symbol`);
   const removedTop = listed.find((r) => r.change.change === "removed");
   if (removedTop) help.push(`${removedTop.symbol} was removed but is still referenced - those files break`);
   if (truncated) help.push(`Showing ${refRows.length} of ${outsideTotal} ref rows; run \`${rerun(arg, parsed, `--limit ${Math.min(MAX_LIMIT, outsideTotal)}`)}\` for more`);
@@ -765,19 +787,23 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       ...header,
       ...(listed.length > 0
         ? {
-            changed: listed.map((r) => ({
-              symbol: r.symbol,
-              kind: r.kind,
-              change: r.change.change satisfies ChangeClass,
-              exported: r.exported,
-              at: r.at,
-              refs_total: r.all.length,
-              refs_outside: r.outside.length,
-              via: r.via.length,
-              ...(gap > 0 ? { textual: r.textual ? r.textual.matches : "-" } : {}),
-              ...(rows.some((x) => x.template) ? { templates: r.templates ? r.templates.length : "-" } : {}),
-              ...fileCounts(r),
-            })),
+            changed: listed.map((r) => {
+              // Built in the full column order, then cut to the default plus --fields, so --fields all matches the old output.
+              const full: Record<string, unknown> = {
+                symbol: r.symbol,
+                kind: r.kind,
+                change: r.change.change satisfies ChangeClass,
+                exported: r.exported,
+                at: r.at,
+                refs_total: r.all.length,
+                refs_outside: r.outside.length,
+                via: r.via.length,
+                ...(gap > 0 ? { textual: r.textual ? r.textual.matches : "-" } : {}),
+                ...(rows.some((x) => x.template) ? { templates: r.templates ? r.templates.length : "-" } : {}),
+                ...fileCounts(r),
+              };
+              return Object.fromEntries(Object.entries(full).filter(([k]) => !OPT_IN.has(k) || extras.has(k)));
+            }),
             ...(refRows.length > 0 ? { refs: refRows } : {}),
           }
         : {}),

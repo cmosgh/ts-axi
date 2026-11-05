@@ -233,15 +233,17 @@ export function parseFields(
     ...new Set(
       raw
         .split(",")
-        .map((f) => f.trim())
+        .map((f) => f.trim().toLowerCase())
         .filter(Boolean),
     ),
   ];
-  const bad = requested.filter((f) => !available.includes(f));
+  const bad = requested.filter((f) => f !== "all" && !available.includes(f));
   if (bad.length > 0) {
     throw usageError(`unknown field${bad.length > 1 ? "s" : ""}: ${bad.join(", ")}`, [
-      `available --fields: ${available.join(", ")}`,
+      `available --fields: ${available.join(", ")} (or all)`,
     ]);
   }
-  return requested;
+  if (requested.includes("all")) return [...available];
+  // Columns keep the documented order whatever order they were asked in.
+  return available.filter((f) => requested.includes(f));
 }

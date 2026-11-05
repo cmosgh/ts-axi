@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 import { posix, relative, resolve, sep } from "node:path";
-import { bool, flag, parseArgs } from "../args.js";
+import { bool, flag, parseArgs, parseFields } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { usageError } from "../errors.js";
 import { hasGlobMagic, matchesGlob } from "../glob.js";
@@ -11,10 +11,10 @@ import type { Declaration } from "../symbols.js";
 const MAX_ROWS = 300;
 
 export const OUTLINE_HELP = `usage: ts-axi outline <file | glob>... [flags]
-flags[3]:
-  --exported (alias --exports; exported Declarations only), -P <tsconfig> (file list for globs), --json
+flags[4]:
+  --exported (alias --exports; exported Declarations only), --fields exported (adds an exported column), -P <tsconfig> (file list for globs), --json
 output:
-  one file = file + decls[n]{line,kind,name,exported,signature}; several = decls[n]{file,line,kind,name,exported,signature}
+  one file = file + decls[n]{line,kind,name,signature}; several = decls[n]{at,kind,name,signature} (at = path:line); --exported keeps only exported Declarations, --fields exported adds the column
   class members follow their class as Class.member; at most ${MAX_ROWS} rows
   kind state = a ui-router / ngRoute state as states.<name> (routes.<path>); its callbacks follow as states.<name>.resolve.<key> / states.<name>.onEnter
 examples[3]:
@@ -34,6 +34,7 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
     args,
     [
       { name: "--exported", alias: "--exports", boolean: true },
+      { name: "--fields" },
       { name: "-P" },
     ],
     COMMAND,
@@ -42,6 +43,7 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
     throw usageError("missing argument", [`usage: ${COMMAND} <file | glob>... [--exported]`]);
   }
   const exportedOnly = bool(parsed, "--exported");
+  const showExported = parseFields(flag(parsed, "--fields"), ["exported"]).length > 0;
   const override = flag(parsed, "-P");
   const root = findRepoRoot(ctx.cwd);
   const cwdPrefix = relative(root, resolve(ctx.cwd)).split(sep).join("/");
@@ -82,11 +84,10 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
   const shown = decls.slice(0, MAX_ROWS);
   const single = unique.length === 1;
   const rows = shown.map((d) => ({
-    ...(single ? {} : { file: d.file }),
-    line: d.nameLine,
+    ...(single ? { line: d.nameLine } : { at: `${d.file}:${d.nameLine}` }),
     kind: d.kind,
     name: d.qualifiedName,
-    exported: d.exported,
+    ...(showExported ? { exported: d.exported } : {}),
     signature: d.signature,
   }));
 

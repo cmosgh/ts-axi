@@ -62,7 +62,12 @@ function gitError(result: GitResult, args: string[]): AxiError {
   const message = first.replace(/^(fatal|error): /, "");
   const suggestions = /not a git repository/i.test(first)
     ? ["Run `ts-axi impact -` with a unified diff on stdin instead"]
-    : [];
+    : /unknown revision|bad revision|invalid object name|no merge base/i.test(first)
+      ? [
+          "Run `git branch -a` or `git log --oneline -5` to pick an existing revision",
+          "Run `ts-axi impact` for uncommitted changes, or `ts-axi impact <base>...HEAD` for a branch",
+        ]
+      : [];
   return new AxiError(message, "GIT_ERROR", suggestions);
 }
 
