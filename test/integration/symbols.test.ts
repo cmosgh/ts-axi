@@ -381,3 +381,33 @@ describe("errors and timing", () => {
     }
   });
 });
+
+describe("--ref HEAD on a dirty working tree", () => {
+  const QUERIES = [
+    ["outline", "src/lib/cart.ts"],
+    ["def", "Cart.total"],
+    ["refs", "formatPrice"],
+    ["callers", "Cart.total"],
+  ];
+  const strip = (data: Payload): Payload => {
+    const { ref: _ref, node_modules: _nm, elapsed_ms: _ms, help: _help, ...rest } = data;
+    return rest;
+  };
+
+  it("answers each command like the clean checkout", async () => {
+    const clean: Payload[] = [];
+    for (const q of QUERIES) clean.push(await toon(...q));
+    const original = readFileSync(join(sample.dir, "src/lib/cart.ts"), "utf8");
+    try {
+      sample.write("src/lib/cart.ts", `// moved\n\n\n${original.replace("total(): string", "sum(): string")}`);
+      sample.write("src/lib/format.ts", "export const broken = (;\n");
+      for (const [i, q] of QUERIES.entries()) {
+        const data = await toon(...q, "--ref", "HEAD");
+        expect(data["ref"]).toMatch(/^HEAD @ [0-9a-f]{7}$/);
+        expect(strip(data), q.join(" ")).toEqual(strip(clean[i]!));
+      }
+    } finally {
+      await sample.git("checkout", "-q", ".");
+    }
+  });
+});

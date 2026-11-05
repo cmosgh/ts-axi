@@ -10,6 +10,7 @@ const TIMEOUT_MS = 20_000;
 const MAX_BUFFER = 256 * 1024 * 1024;
 /** `git diff` target for a repository with no commits yet. */
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+export const REV_HINT = "Run `git branch -a` or `git log --oneline -5` to pick an existing revision";
 
 export type DiffStatus = "added" | "modified" | "deleted" | "renamed";
 
@@ -64,7 +65,7 @@ function gitError(result: GitResult, args: string[]): AxiError {
     ? ["Run `ts-axi impact -` with a unified diff on stdin instead"]
     : /unknown revision|bad revision|invalid object name|no merge base/i.test(first)
       ? [
-          "Run `git branch -a` or `git log --oneline -5` to pick an existing revision",
+          REV_HINT,
           "Run `ts-axi impact` for uncommitted changes, or `ts-axi impact <base>...HEAD` for a branch",
         ]
       : [];

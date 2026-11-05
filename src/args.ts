@@ -39,6 +39,15 @@ const POSITIONAL: Record<string, string> = {
   "--name": "pass the symbol as a positional argument",
 };
 
+/** Commands that take `--ref <rev>`. */
+export const REF_COMMANDS = ["def", "refs", "callers", "outline"] as const;
+
+function refHint(command: string, rev: string | undefined): string {
+  const value = rev && !rev.startsWith("-") ? rev : "<ref>";
+  if (command === "ts-axi impact") return `Run \`ts-axi impact ${value}...HEAD\` - impact takes git revisions as its range`;
+  return `--ref works with ${REF_COMMANDS.join(", ")} only`;
+}
+
 /**
  * Strict declarative parser: every flag must be declared, unknown flags fail
  * loud with the valid set inline (AXI principle 6). Supports `--flag value`,
@@ -62,9 +71,11 @@ export function parseArgs(
     positionals: [],
   };
   const unknown: string[] = [];
+  let refValue: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
+    if (token === "--ref" || token.startsWith("--ref=")) refValue = token.startsWith("--ref=") ? token.slice(6) : args[i + 1];
     if (token === "--") {
       parsed.positionals.push(...args.slice(i + 1));
       break;
@@ -127,9 +138,11 @@ export function parseArgs(
     const positional = unknown
       .filter((flag) => POSITIONAL[flag])
       .map((flag) => `${flag} is not supported; ${POSITIONAL[flag]}`);
+    const ref = unknown.includes("--ref") ? [refHint(command, refValue)] : [];
     throw usageError(
       `unknown flag${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")} for \`${command}\``,
       [
+        ...ref,
         ...renamed,
         ...positional,
         `valid flags for \`${command}\`: ${valid} (--help always allowed)`,

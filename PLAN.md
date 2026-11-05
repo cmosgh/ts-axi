@@ -1,6 +1,6 @@
 # ts-axi plan
 
-AXI CLI (https://axi.md) for TypeScript/JavaScript code: a queryable symbol index whose purpose is `impact` - an agent reviewing a change learns which other parts of the code it affects without reading dozens of files. Read-only: no lint, no refactor, no rename. Vocabulary: `GLOSSARY.md`. Engine choice: `docs/adr/0001`; monorepo scope: `docs/adr/0002`.
+AXI CLI (https://axi.md) for TypeScript/JavaScript code: a queryable symbol index whose purpose is `impact` - an agent reviewing a change learns which other parts of the code it affects without reading dozens of files. Read-only: no lint, no refactor, no rename. Vocabulary: `GLOSSARY.md`. Engine choice: `docs/adr/0001`; monorepo scope: `docs/adr/0002`; `--ref`: `docs/adr/0003`.
 
 Built like `../bb-axi`: same `args.ts` / `render.ts` / `errors.ts` / `version.ts`, `runAxiCli` from `axi-sdk-js`, TOON output, generated `skills/ts-axi/SKILL.md`.
 
@@ -31,6 +31,10 @@ Scope: with no `-P` and no `.ts-axi.json` `project`, a multi-project workspace (
 - `-P` keeps one explicit project. `refs`/`callers` with `refs_total: 0` under `-P` in a workspace list `found_outside_project[n]{file,line}` (importers outside the Project whose text names the Symbol) + a hint to run without `-P`.
 - Type errors in the analysed project never block anything: `diagnostics: <n>` (count only) when > 0 on the semantic path.
 
+### `--ref <rev>` (ADR 0003)
+
+`def`, `refs`, `callers`, `outline` answer from the git tree of `<rev>` instead of the working tree. Every repo read goes through `sourceFs()` (`src/fs.ts`); `--ref` swaps `diskFs` for `gitTreeFs` (`src/gittree.ts`): rev resolved once to a SHA, one `ls-tree -r -z`, blobs by batched `cat-file --batch` (2000 per call, prefetched per listing), `GIT_NO_LAZY_FETCH=1`, submodules skipped, symlinks followed inside the tree. Paths outside the root and `node_modules` stay on disk (`node_modules: working tree (not in git)` when read); `.ts-axi.json` stays on disk. Output starts with `ref: <rev> @ <short sha>`; hints keep `--ref`. A file not in the rev: `file not in <rev>: <path>` (exit 2). Unknown rev, missing blob: `GIT_ERROR`. `impact`, `config`, `setup` reject `--ref` (impact hint: `ts-axi impact <rev>...HEAD`). Guards: `test/ref.test.ts` (poisoned working tree = clean checkout) and `test/ref-leak.test.ts` (no disk read below the root).
+
 ## Commands
 
 | Command | Path | What |
@@ -43,7 +47,7 @@ Scope: with no `-P` and no `.ts-axi.json` `project`, a multi-project workspace (
 | `impact [<git-range> \| -]` | semantic | See below. |
 | `config` | - | `config` prints effective settings with their source (`default`, `.ts-axi.json`, `flag`); `config set <key> <value> [--replace]`, `config unset <key>` write `.ts-axi.json` at the repo root (idempotent, no `--confirm`). Keys: `test-globs` (repeatable/additive unless `--replace`), `project`. |
 
-Global flags: `--json` (decoded TOON payload, like mysql-axi), `--help`/`-h` per command, `-v/--version` (fast path), `-P <tsconfig>` on every command that may go semantic.
+Global flags: `--json` (decoded TOON payload, like mysql-axi), `--help`/`-h` per command, `-v/--version` (fast path), `-P <tsconfig>` on every command that may go semantic, `--ref <rev>` on `def`, `refs`, `callers`, `outline`.
 
 ### Targets
 
@@ -128,4 +132,5 @@ Located at the git root (or cwd when not a repo). Unknown keys → `VALIDATION_E
 3. `impact` (done). Shape as shipped: one `changed[n]{symbol,kind,change,exported,at,refs_total,refs_outside,files,tests}` table plus a flat `refs[n]{symbol,file,line,context}` table, `file_level[n]`, `blind_spots[n]{symbol,file,line,reason}`, `skipped[n]{file,reason}` for non-analysed files (`.astro`, `.css`, ...). `impact -` rebuilds the before version by reverse-applying hunks; untracked files count as `added`.
 4. Unit + command tests (`pnpm test`) and the opt-in integration suite over the vendored Astro sample (`pnpm run test:integration`, `test/integration/README.md`) (done).
 5. Workspace detection, importer-subgraph scope, references-only tsconfig expansion, git-based file listing (done).
-6. Phase 2 ideas (not now): daemon/cache, vitest/jest config suggestion, token benchmark like mysql-axi.
+6. `--ref <rev>` over git objects, the `sourceFs()` seam, poisoned-tree and no-leak tests (done).
+7. Phase 2 ideas (not now): daemon/cache, vitest/jest config suggestion, token benchmark like mysql-axi.

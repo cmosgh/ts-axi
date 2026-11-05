@@ -11,5 +11,6 @@ AXI-compliant TypeScript symbol CLI (definitions, references, callers, outlines,
 - **Never a silent miss.** Truncation says how much is missing; unresolvable uses go to `blind_spots`; an implicit project prints a warning; `diagnostics: n` reports type errors as a count.
 - **The home view runs at session start** (`setup hooks`): no program build, no git network calls, exit 0 in any directory - a broken `.ts-axi.json` is reported in `settings`, not thrown.
 - `src/version.ts` is a leaf module (node builtins only) for the `--version` fast path.
+- **Repo reads go through `sourceFs()`** (`src/fs.ts`), never `node:fs` or `ts.sys` directly: `--ref` swaps in the git tree, and `test/ref-leak.test.ts` fails on a read that bypasses it.
 - Tests: `test/unit.test.ts` (pure logic), `test/commands.test.ts` (whole CLI via `main()` over `test/fixtures/project`) and `test/setup.test.ts` (hooks, with HOME in a temp dir - never the real agent config). Fixtures are synthetic - never commit real project, file or people names.
 - `pnpm run check` must pass. `skills/ts-axi/SKILL.md` is generated: `pnpm run build:skill`.

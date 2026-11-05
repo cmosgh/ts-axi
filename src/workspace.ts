@@ -1,6 +1,6 @@
 // Workspace detection (no configuration): which kind of repo this is, its projects,
 // path aliases and workspace packages. Reads files only; never writes, never caches.
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { sourceFs } from "./fs.js";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { matchesGlob } from "./glob.js";
 import { listFiles, toRel } from "./walk.js";
@@ -70,12 +70,8 @@ export function kindLabel(kind: WorkspaceKind): string {
 
 /** JSON with comments and trailing commas (tsconfig style); undefined when unreadable. */
 export function readJsonc(path: string): Record<string, unknown> | undefined {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch {
-    return undefined;
-  }
+  const text = sourceFs().readFile(path);
+  if (text === undefined) return undefined;
   let outText = "";
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
@@ -126,14 +122,12 @@ export function classifyTsconfig(path: string): TsconfigRole {
 }
 
 function tsconfigsIn(dir: string): string[] {
-  try {
-    return readdirSync(dir)
-      .filter((n) => /^tsconfig.*\.json$/.test(n))
-      .map((n) => join(dir, n))
-      .sort();
-  } catch {
-    return [];
-  }
+  return sourceFs()
+    .readdir(dir)
+    .map((e) => e.name)
+    .filter((n) => /^tsconfig.*\.json$/.test(n))
+    .map((n) => join(dir, n))
+    .sort();
 }
 
 function stringArray(value: unknown): string[] {
@@ -204,7 +198,7 @@ function readPackage(dir: string): WorkspacePackage | undefined {
 
 /** `compilerOptions.paths` of tsconfig.base.json (else tsconfig.json), following relative `extends`. */
 export function readPathAliases(root: string): PathAliases | undefined {
-  const start = [join(root, "tsconfig.base.json"), join(root, "tsconfig.json")].find((f) => existsSync(f));
+  const start = [join(root, "tsconfig.base.json"), join(root, "tsconfig.json")].find((f) => sourceFs().exists(f));
   let file = start;
   for (let hops = 0; file && hops < 5; hops++) {
     const config = readJsonc(file);
@@ -219,7 +213,7 @@ export function readPathAliases(root: string): PathAliases | undefined {
     }
     const ext = config["extends"];
     const next = typeof ext === "string" && ext.startsWith(".") ? resolve(dirname(file), ext) : undefined;
-    file = next && !next.endsWith(".json") && !existsSync(next) ? `${next}.json` : next;
+    file = next && !next.endsWith(".json") && !sourceFs().exists(next) ? `${next}.json` : next;
   }
   return undefined;
 }
@@ -239,7 +233,7 @@ function project(root: string, relDir: string, name?: string): WorkspaceProject 
 
 /** Cheap pre-check (no file listing): could `root` be a multi-project workspace? */
 export function hasMultiProjectSignal(root: string): boolean {
-  if (existsSync(join(root, "nx.json")) || existsSync(join(root, "pnpm-workspace.yaml"))) return true;
+  if (sourceFs().exists(join(root, "nx.json")) || sourceFs().exists(join(root, "pnpm-workspace.yaml"))) return true;
   if (readJsonc(join(root, "package.json"))?.["workspaces"] !== undefined) return true;
   return referencesOnly(readJsonc(join(root, "tsconfig.json")));
 }
@@ -248,11 +242,13 @@ export function detectWorkspace(root: string): Workspace {
   const { files, listedBy } = listWorkspaceFiles(root);
   const dirsWith = (fileName: string): string[] =>
     files.filter((f) => f === fileName || f.endsWith(`/${fileName}`)).map((f) => (f === fileName ? "" : f.slice(0, -fileName.length - 1)));
+  // One batch for the per-project manifests read below (one git call each under --ref otherwise).
+  sourceFs().prefetch(files.filter((f) => /(?:^|\/)(?:project\.json|package\.json|tsconfig[^/]*\.json)$/.test(f)).map((f) => join(root, f)));
   const packageDirs = dirsWith("package.json");
   const signals: WorkspaceKind[] = [];
   const byKind = new Map<WorkspaceKind, WorkspaceProject[]>();
 
-  if (existsSync(join(root, "nx.json"))) {
+  if (sourceFs().exists(join(root, "nx.json"))) {
     signals.push("nx");
     const projects = dirsWith("project.json").map((d) => {
       const name = readJsonc(join(root, d, "project.json"))?.["name"];
@@ -268,8 +264,8 @@ export function detectWorkspace(root: string): Workspace {
     byKind.set("nx", projects);
   }
   const pnpmFile = join(root, "pnpm-workspace.yaml");
-  if (existsSync(pnpmFile)) {
-    const globs = pnpmPackageGlobs(readFileSync(pnpmFile, "utf8"));
+  if (sourceFs().exists(pnpmFile)) {
+    const globs = pnpmPackageGlobs(sourceFs().readFile(pnpmFile) ?? "");
     if (globs.length > 0) {
       signals.push("pnpm-workspaces");
       byKind.set("pnpm-workspaces", matchPackageDirs(globs, packageDirs).map((d) => project(root, d, readPackage(join(root, d))?.name)));
@@ -283,16 +279,16 @@ export function detectWorkspace(root: string): Workspace {
     byKind.set("npm-workspaces", matchPackageDirs(npmGlobs, packageDirs).map((d) => project(root, d, readPackage(join(root, d))?.name)));
   }
   const rootTsconfig = join(root, "tsconfig.json");
-  const rootConfig = existsSync(rootTsconfig) ? readJsonc(rootTsconfig) : undefined;
+  const rootConfig = sourceFs().exists(rootTsconfig) ? readJsonc(rootTsconfig) : undefined;
   if (referencesOnly(rootConfig)) {
     signals.push("tsconfig-references");
     const refs = (rootConfig!["references"] as Array<{ path?: unknown }>).map((r) => r.path).filter((p): p is string => typeof p === "string");
     const dirs = refs.map((p) => {
       const abs = resolve(root, p);
-      return existsSync(abs) && statSync(abs).isFile() ? dirname(abs) : abs;
+      return sourceFs().isFile(abs) ? dirname(abs) : abs;
     });
     byKind.set("tsconfig-references", [...new Set(dirs)].map((d) => project(root, relative(root, d).split(sep).join("/"))));
-  } else if (existsSync(rootTsconfig)) {
+  } else if (sourceFs().exists(rootTsconfig)) {
     signals.push("single");
     byKind.set("single", [project(root, "")]);
   }
@@ -302,7 +298,7 @@ export function detectWorkspace(root: string): Workspace {
 
   // Workspace packages: package.json with a name in any project dir or matched workspace dir.
   const pkgDirs = new Set<string>();
-  for (const list of byKind.values()) for (const p of list) if (p.dir !== root && existsSync(join(p.dir, "package.json"))) pkgDirs.add(p.dir);
+  for (const list of byKind.values()) for (const p of list) if (p.dir !== root && sourceFs().exists(join(p.dir, "package.json"))) pkgDirs.add(p.dir);
   const packages = [...pkgDirs].map(readPackage).filter((p): p is WorkspacePackage => p !== undefined);
   const paths = readPathAliases(root);
 

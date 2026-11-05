@@ -1,6 +1,6 @@
 // Project discovery and the two engine paths (ADR 0001): a syntactic index
 // over `ts.createSourceFile`, and a LanguageService for semantic queries.
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { diskFs, sourceFs, type SourceFs } from "./fs.js";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 import { usageError } from "./errors.js";
@@ -17,18 +17,77 @@ export const IMPLICIT_WARNING = "no tsconfig.json found - implicit project";
 
 function real(path: string): string {
   try {
-    return realpathSync(path);
+    return sourceFs().realpath(path);
   } catch {
     return resolve(path);
   }
 }
 
-/** Nearest ancestor of `cwd` (inclusive) holding `.git`, else `cwd`. */
+/**
+ * TypeScript's system calls over the active SourceFs: `ts.sys` itself on disk (unchanged
+ * behaviour), else the same calls answered by the git tree, with `ts.matchFiles` for globs.
+ */
+export type FsSystem = ts.ParseConfigHost & ts.ModuleResolutionHost & {
+  directoryExists(path: string): boolean;
+  getDirectories(path: string): string[];
+  realpath?(path: string): string;
+  readDirectory(path: string, extensions?: readonly string[], exclude?: readonly string[], include?: readonly string[], depth?: number): string[];
+};
+
+type MatchFiles = (
+  path: string,
+  extensions: readonly string[] | undefined,
+  excludes: readonly string[] | undefined,
+  includes: readonly string[] | undefined,
+  useCaseSensitiveFileNames: boolean,
+  currentDirectory: string,
+  depth: number | undefined,
+  getFileSystemEntries: (path: string) => { files: readonly string[]; directories: readonly string[] },
+  realpath: (path: string) => string,
+) => string[];
+
+const systems = new WeakMap<SourceFs, FsSystem>();
+
+export function tsSystem(fs: SourceFs = sourceFs()): FsSystem {
+  if (fs === diskFs) return ts.sys;
+  let system = systems.get(fs);
+  if (system) return system;
+  // Internal but stable since TS 2.x; ts.sys.readDirectory uses the same function.
+  const matchFiles = (ts as unknown as { matchFiles: MatchFiles }).matchFiles;
+  const realpath = (p: string): string => {
+    try {
+      return fs.realpath(p);
+    } catch {
+      return p;
+    }
+  };
+  const entries = (dir: string): { files: string[]; directories: string[] } => {
+    const list = fs.readdir(dir);
+    return { files: list.filter((e) => e.isFile).map((e) => e.name), directories: list.filter((e) => e.isDirectory).map((e) => e.name) };
+  };
+  system = {
+    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    fileExists: (p) => fs.isFile(p),
+    // ts.sys.readFile drops a UTF-8 BOM.
+    readFile: (p) => fs.readFile(p)?.replace(/^﻿/, ""),
+    directoryExists: (p) => fs.isDirectory(p),
+    getDirectories: (p) => entries(p).directories,
+    realpath,
+    readDirectory: (path, extensions, exclude, include, depth) =>
+      matchFiles(path, extensions, exclude, include, ts.sys.useCaseSensitiveFileNames, process.cwd(), depth, entries, realpath),
+  };
+  systems.set(fs, system);
+  return system;
+}
+
+/** Nearest ancestor of `cwd` (inclusive) holding `.git`, else `cwd`; the tree root under `--ref`. */
 export function findRepoRoot(cwd: string): string {
+  const ref = sourceFs().ref;
+  if (ref) return ref.root;
   const start = real(cwd);
   let dir = start;
   for (;;) {
-    if (existsSync(join(dir, ".git"))) return dir;
+    if (sourceFs().exists(join(dir, ".git"))) return dir;
     const parent = dirname(dir);
     if (parent === dir) return start;
     dir = parent;
@@ -54,8 +113,8 @@ export interface DiscoverOptions {
 
 function explicitTsconfig(raw: string, base: string, source: string): string {
   const abs = resolve(base, raw);
-  const file = existsSync(abs) && statSync(abs).isDirectory() ? join(abs, "tsconfig.json") : abs;
-  if (!existsSync(file)) {
+  const file = sourceFs().isDirectory(abs) ? join(abs, "tsconfig.json") : abs;
+  if (!sourceFs().exists(file)) {
     throw usageError(`tsconfig not found: ${raw} (${source})`, [
       "pass an existing tsconfig with -P <path>, or omit it to use the nearest tsconfig.json",
     ]);
@@ -77,7 +136,7 @@ export function discoverTsconfig(startDir: string, options: DiscoverOptions = {}
   let dir = real(startDir);
   for (;;) {
     const candidate = join(dir, "tsconfig.json");
-    if (existsSync(candidate)) return { path: candidate, implicit: false };
+    if (sourceFs().exists(candidate)) return { path: candidate, implicit: false };
     const parent = dirname(dir);
     if (parent === dir || (options.stopAt !== undefined && dir === real(options.stopAt))) return { path: null, implicit: true };
     dir = parent;
@@ -135,9 +194,9 @@ export interface ExpandedConfig {
 }
 
 function readTsconfig(path: string): ts.ParsedCommandLine | undefined {
-  const read = ts.readConfigFile(path, ts.sys.readFile);
+  const read = ts.readConfigFile(path, tsSystem().readFile);
   if (read.error) return undefined;
-  return ts.parseJsonConfigFileContent(read.config, ts.sys, dirname(path), undefined, path);
+  return ts.parseJsonConfigFileContent(read.config, tsSystem(), dirname(path), undefined, path);
 }
 
 function sourceNames(parsed: ts.ParsedCommandLine): string[] {
@@ -164,7 +223,7 @@ export function expandTsconfig(path: string): ExpandedConfig[] {
     if (fileNames.length === 0 && refs.length > 0) {
       for (const ref of refs) {
         const target = ts.resolveProjectReferencePath(ref);
-        if (existsSync(target)) visit(target);
+        if (sourceFs().exists(target)) visit(target);
       }
       return;
     }
@@ -185,14 +244,14 @@ export function loadProject(root: string, location: TsconfigLocation): ParsedPro
   if (!location.path) {
     return { root, tsconfig: null, implicit: true, fileNames: walkSourceFiles(root), options: IMPLICIT_COMPILER_OPTIONS };
   }
-  const read = ts.readConfigFile(location.path, ts.sys.readFile);
+  const read = ts.readConfigFile(location.path, tsSystem().readFile);
   if (read.error) {
     throw usageError(`cannot read ${location.path} - ${ts.flattenDiagnosticMessageText(read.error.messageText, " ")}`);
   }
   const configs = expandTsconfig(location.path);
   const self = configs.length === 1 && configs[0]!.path === real(location.path);
   if (self || configs.length === 0) {
-    const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, dirname(location.path), undefined, location.path);
+    const parsed = ts.parseJsonConfigFileContent(read.config, tsSystem(), dirname(location.path), undefined, location.path);
     return { root, tsconfig: location.path, implicit: false, fileNames: sourceNames(parsed), options: { ...parsed.options, noEmit: true } };
   }
   const fileNames = [...new Set(configs.flatMap((c) => c.fileNames))].sort();
@@ -262,6 +321,7 @@ export function findOutsideProject(index: SyntacticIndex, query: NameQuery, max 
   const inProject = new Set(index.files);
   const { files } = listFiles(index.root, isSourceFile, { maxFiles: OUTSIDE_WALK_CAP, deadline: Date.now() + OUTSIDE_WALK_MS });
   const hits: Declaration[] = [];
+  sourceFs().prefetch(files.filter((f) => !inProject.has(f)));
   for (const path of files.sort((a, b) => byDepthThenPath(index.rel(a), index.rel(b)))) {
     if (inProject.has(path)) continue;
     const text = index.text(path);
@@ -276,7 +336,7 @@ export function findOutsideProject(index: SyntacticIndex, query: NameQuery, max 
 export function nearestTsconfig(abs: string, root: string): string | undefined {
   for (let dir = dirname(abs); ; dir = dirname(dir)) {
     const candidate = join(dir, "tsconfig.json");
-    if (existsSync(candidate)) return candidate;
+    if (sourceFs().exists(candidate)) return candidate;
     if (dir === root || dirname(dir) === dir) return undefined;
   }
 }
@@ -293,15 +353,7 @@ export function createSyntacticIndex(root: string, project: ParsedProject): Synt
     rel: (abs) => relPath(root, abs),
     abs: (rel) => (isAbsolute(rel) ? rel : join(root, rel)),
     text(abs) {
-      if (!texts.has(abs)) {
-        let text: string | undefined;
-        try {
-          text = readFileSync(abs, "utf8");
-        } catch {
-          text = undefined;
-        }
-        texts.set(abs, text);
-      }
+      if (!texts.has(abs)) texts.set(abs, sourceFs().readFile(abs));
       return texts.get(abs);
     },
     sourceFile(abs) {
@@ -325,6 +377,7 @@ export function createSyntacticIndex(root: string, project: ParsedProject): Synt
       const word = query.member ?? query.name;
       const needle = query.fuzzy ? word.toLowerCase() : word;
       const result: Declaration[] = [];
+      sourceFs().prefetch(index.files);
       for (const file of index.files) {
         const text = index.text(file);
         if (text === undefined) continue;
@@ -335,6 +388,7 @@ export function createSyntacticIndex(root: string, project: ParsedProject): Synt
     },
     allNames() {
       const names = new Set<string>();
+      sourceFs().prefetch(index.files);
       for (const file of index.files) {
         for (const decl of index.declarations(file)) {
           names.add(decl.name);
@@ -479,6 +533,7 @@ function createModuleResolver(
   isSource: (abs: string) => boolean,
   sourceOf: (abs: string) => ts.SourceFile | undefined,
 ): NonNullable<ts.LanguageServiceHost["resolveModuleNameLiterals"]> {
+  const system = tsSystem();
   const cache = ts.createModuleResolutionCache(currentDirectory, (s) => (ts.sys.useCaseSensitiveFileNames ? s : s.toLowerCase()), options);
   const resolveOne = (
     name: string,
@@ -487,7 +542,7 @@ function createModuleResolver(
     redirected: ts.ResolvedProjectReference | undefined,
     hops: number,
   ): ts.ResolvedModuleWithFailedLookupLocations => {
-    const result = ts.resolveModuleName(name, containingFile, options, ts.sys, cache, redirected, mode);
+    const result = ts.resolveModuleName(name, containingFile, options, system, cache, redirected, mode);
     const found = result.resolvedModule;
     if (!found) return result;
     let resolvedFileName = resolve(found.resolvedFileName);
@@ -518,6 +573,8 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
   const snapshots = new Map<string, ts.IScriptSnapshot | undefined>();
   const currentDirectory = scope?.currentDirectory ?? (project.tsconfig ? dirname(project.tsconfig) : index.root);
   const indexed = new Set(index.files);
+  const system = tsSystem();
+  sourceFs().prefetch(fileNames);
 
   const host: ts.LanguageServiceHost = {
     getCompilationSettings: () => options,
@@ -525,19 +582,19 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
     getScriptVersion: () => "1",
     getScriptSnapshot(file) {
       if (!snapshots.has(file)) {
-        const text = indexed.has(file) ? index.text(file) : ts.sys.readFile(file);
+        const text = indexed.has(file) ? index.text(file) : system.readFile(file);
         snapshots.set(file, text === undefined ? undefined : ts.ScriptSnapshot.fromString(text));
       }
       return snapshots.get(file);
     },
     getCurrentDirectory: () => currentDirectory,
     getDefaultLibFileName: (options) => ts.getDefaultLibFilePath(options),
-    fileExists: ts.sys.fileExists,
-    readFile: ts.sys.readFile,
-    readDirectory: ts.sys.readDirectory,
-    directoryExists: ts.sys.directoryExists,
-    getDirectories: ts.sys.getDirectories,
-    realpath: ts.sys.realpath,
+    fileExists: system.fileExists,
+    readFile: system.readFile,
+    readDirectory: system.readDirectory,
+    directoryExists: system.directoryExists,
+    getDirectories: system.getDirectories,
+    ...(system.realpath ? { realpath: system.realpath } : {}),
     useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
     resolveModuleNameLiterals: createModuleResolver(options, currentDirectory, (f) => indexed.has(f), (f) => index.sourceFile(f)),
   };
@@ -834,7 +891,7 @@ export function openProject(
     ...(options.override ? { override: options.override } : {}),
     ...(options.settingsProject ? { settingsProject: options.settingsProject } : {}),
     settingsRoot: options.settingsRoot ?? root,
-    ...(existsSync(join(root, ".git")) ? { stopAt: root } : {}),
+    ...(sourceFs().ref || sourceFs().exists(join(root, ".git")) ? { stopAt: root } : {}),
   });
   const explicit = options.override !== undefined || options.settingsProject !== undefined;
   let project: ParsedProject | undefined;

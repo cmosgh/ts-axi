@@ -24,6 +24,7 @@ import {
   positionStartDir,
   projectFields,
   readFilters,
+  useRef,
   resolveNameTarget,
   resolvePosition,
   suggestions,
@@ -36,7 +37,7 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 const DEPTH_ROWS = 50;
 
-const SHARED_FLAGS = `--kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state> (narrows a name), --in <dir|glob> (repeatable; Declarations in these files), --exported, --fuzzy, --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} rows), --test-glob <glob> (repeatable; extra Test file pattern), --via (adds via rows with a via column), -P <tsconfig>, --json`;
+const SHARED_FLAGS = `--kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state> (narrows a name), --in <dir|glob> (repeatable; Declarations in these files), --exported, --fuzzy, --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} rows), --test-glob <glob> (repeatable; extra Test file pattern), --via (adds via rows with a via column), -P <tsconfig>, --ref <rev> (read the code at a git revision; working tree ignored), --json`;
 
 const VIA_DOC = `via_interface: n (Iface.member) = References through an interface or base member the Symbol implements or overrides - they MAY reach it; not in refs_total
   via_implementations: n (Impl.member) = References to implementations or overrides of the Symbol; not in refs_total
@@ -49,7 +50,7 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   templates: n usages in m files = template uses (.html .htm .ejs .hbs .njk .pug) of a directive or component (<wap-select / wap-select / data-wap-select), its bindings (fallback-display-property= on that tag), a controller (ng-controller) or a filter (| money); refs --grep lists them in unresolved`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
-flags[12]:
+flags[13]:
   ${SHARED_FLAGS}
   --implementations (lists implementations[n]{file,line,symbol} instead of the count)
   --grep (adds unresolved[n]{file,line,context} - textual matches of the name that are not References; also searches .astro/.vue/.svelte/.mdx/.html)
@@ -67,7 +68,7 @@ examples[4]:
 `;
 
 export const CALLERS_HELP = `usage: ts-axi callers <name | Class.member | path:line[:col]> [flags]
-flags[11]:
+flags[12]:
   ${SHARED_FLAGS}
   --depth <1-3> (default 1; levels > 1 print callers_depthN[n]{caller,file,count}, no locations)
 output:
@@ -123,6 +124,7 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
     grep: invoked === "refs" && bool(parsed, "--grep"),
   };
   const started = performance.now();
+  ctx = useRef(ctx, parsed);
   const opened = open(ctx.cwd, parsed, positionStartDir(ctx.cwd, target));
   const warning = opened.warning ? { warning: opened.warning } : {};
 
