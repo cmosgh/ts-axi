@@ -11,12 +11,12 @@ const MODE_LINK = "120000";
 const MODE_SUBMODULE = "160000";
 const MAX_LINK_HOPS = 8;
 /** SHAs per `cat-file --batch` call. */
-export const BLOB_CHUNK = 2000;
+const BLOB_CHUNK = 2000;
 const BLOB_MAX_BUFFER = 1024 * 1024 * 1024;
 const SIBLING_PREFETCH = 200;
 const TEXTISH = /\.(?:[cm]?[jt]sx?|json|d\.[cm]?ts)$/;
 
-export const GIT_ENV = { LC_ALL: "C", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1" };
+const GIT_ENV = { LC_ALL: "C", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1" };
 
 interface GitRun {
   stdout: Buffer;
