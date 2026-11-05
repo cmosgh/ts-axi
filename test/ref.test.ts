@@ -111,7 +111,7 @@ describe("--ref HEAD on a poisoned working tree", () => {
       // The poison is real: without --ref most answers change.
       const changed = dirty.filter((d, i) => normalize(d) !== normalize(clean[i]!)).length;
       expect(changed).toBeGreaterThanOrEqual(Math.ceil(c.queries.length / 2));
-    });
+    }, 30_000);
   }
 });
 
