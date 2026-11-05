@@ -18,13 +18,29 @@ export function isJsonMode(): boolean {
   return jsonMode;
 }
 
+let hintRef: string | undefined;
+
+/** `--ref` of this run (set once per run, reset by `main()`): follow-up hints carry it. */
+export function setHintRef(rev: string | undefined): void {
+  hintRef = rev;
+}
+
+const REF_HINT = /`(ts-axi (?:def|refs|callers|outline)\b[^`]*)`/g;
+
+/** Append ` --ref <rev>` to every def/refs/callers/outline command in a hint. */
+export function withRef(line: string, rev: string | undefined = hintRef): string {
+  if (rev === undefined) return line;
+  const value = /^[\w./@^~+-]+$/.test(rev) ? rev : `'${rev.replace(/'/g, "'\\''")}'`;
+  return line.replace(REF_HINT, (whole, cmd: string) => (/ --ref[ =]/.test(cmd) ? whole : `\`${cmd} --ref ${value}\``));
+}
+
 /**
  * Next-step suggestions, one list item per line. `encode()` would inline a
  * primitive array as one comma-joined line; this keeps the payload decodable.
  */
 export function helpBlock(lines: readonly string[]): string {
   if (lines.length === 0) return "";
-  return `help[${lines.length}]:\n${lines.map((l) => `  - ${listItem(l)}`).join("\n")}`;
+  return `help[${lines.length}]:\n${lines.map((l) => `  - ${listItem(withRef(l))}`).join("\n")}`;
 }
 
 /** Quoted only when a decoder would read the bare line differently (`a: b`, `42`). */

@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { sourceFs } from "../fs.js";
 import { posix, relative, resolve, sep } from "node:path";
 import { bool, flag, parseArgs, parseFields } from "../args.js";
 import type { CommandContext } from "../context.js";
@@ -7,12 +7,13 @@ import { hasGlobMagic, matchesGlob } from "../glob.js";
 import { createSyntacticIndex, findRepoRoot, openProject, SOURCE_EXTENSIONS } from "../project.js";
 import { block, helpBlock, out } from "../render.js";
 import type { Declaration } from "../symbols.js";
+import { useRef } from "./common.js";
 
 const MAX_ROWS = 300;
 
 export const OUTLINE_HELP = `usage: ts-axi outline <file | glob>... [flags]
-flags[4]:
-  --exported (alias --exports; exported Declarations only), --fields exported (adds an exported column), -P <tsconfig> (file list for globs), --json
+flags[5]:
+  --exported (alias --exports; exported Declarations only), --fields exported (adds an exported column), -P <tsconfig> (file list for globs), --ref <rev> (the file at a git revision), --json
 output:
   one file = file + decls[n]{line,kind,name,signature}; several = decls[n]{at,kind,name,signature} (at = path:line); --exported keeps only exported Declarations, --fields exported adds the column
   class members follow their class as Class.member; at most ${MAX_ROWS} rows
@@ -36,6 +37,7 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
       { name: "--exported", alias: "--exports", boolean: true },
       { name: "--fields" },
       { name: "-P" },
+      { name: "--ref" },
     ],
     COMMAND,
   );
@@ -45,6 +47,7 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
   const exportedOnly = bool(parsed, "--exported");
   const showExported = parseFields(flag(parsed, "--fields"), ["exported"]).length > 0;
   const override = flag(parsed, "-P");
+  ctx = useRef(ctx, parsed);
   const root = findRepoRoot(ctx.cwd);
   const cwdPrefix = relative(root, resolve(ctx.cwd)).split(sep).join("/");
 
@@ -52,8 +55,9 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
   const globs = parsed.positionals.filter(hasGlobMagic);
   for (const raw of parsed.positionals.filter((p) => !hasGlobMagic(p))) {
     const abs = resolve(ctx.cwd, raw);
-    if (!existsSync(abs) || !statSync(abs).isFile()) {
-      throw usageError(`file not found: ${raw}`, ["pass a source file or a quoted glob such as \"src/**/*.ts\""]);
+    if (!sourceFs().isFile(abs)) {
+      const ref = sourceFs().ref;
+      throw usageError(ref ? `file not in ${ref.rev}: ${raw}` : `file not found: ${raw}`, ["pass a source file or a quoted glob such as \"src/**/*.ts\""]);
     }
     if (!isSource(abs)) throw usageError(`not a TypeScript/JavaScript source file: ${raw}`);
     files.push(abs);

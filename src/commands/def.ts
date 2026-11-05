@@ -19,12 +19,13 @@ import {
   TARGET_FLAGS,
   targetLabel,
   readFilters,
+  useRef,
   type Opened,
 } from "./common.js";
 
 export const DEF_HELP = `usage: ts-axi def <name | Class.member | path:line[:col]> [flags]
-flags[7]:
-  --kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state>, --in <dir|glob> (repeatable; restrict to files), --exported, --fuzzy (substring, case-insensitive), --full (whole body; default first ${BODY_LINES} lines), -P <tsconfig>, --json
+flags[8]:
+  --kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state>, --in <dir|glob> (repeatable; restrict to files), --exported, --fuzzy (substring, case-insensitive), --full (whole body; default first ${BODY_LINES} lines), -P <tsconfig>, --ref <rev> (read the code at a git revision; working tree ignored), --json
 output:
   1 match = file, line, kind, exported, signature + body fenced with file line numbers
   several = matches[n]{at,kind,signature} (at = path:line) (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms (--in, --kind, Class.member, --exported) with how many each keeps
@@ -73,6 +74,7 @@ export async function defCommand(args: string[], ctx: CommandContext): Promise<s
   const target = parseTarget(raw!, { fuzzy: f.fuzzy });
   const full = bool(parsed, "--full");
   const project = flag(parsed, "-P");
+  ctx = useRef(ctx, parsed);
   const opened = open(ctx.cwd, parsed, positionStartDir(ctx.cwd, target));
   const label = targetLabel(target);
 

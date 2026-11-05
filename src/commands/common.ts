@@ -1,6 +1,9 @@
 // Plumbing shared by def / refs / callers / outline: flags, project opening,
 // target resolution and code rendering.
-import { existsSync } from "node:fs";
+import type { CommandContext } from "../context.js";
+import { setSourceFs, sourceFs } from "../fs.js";
+import { openGitTree } from "../gittree.js";
+import { block, setHintRef } from "../render.js";
 import { dirname, posix, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 import { enumFlag, flag, flags, type FlagSpec, type ParsedArgs, bool } from "../args.js";
@@ -31,7 +34,28 @@ export const TARGET_FLAGS: readonly FlagSpec[] = [
   { name: "--exported", boolean: true },
   { name: "--fuzzy", boolean: true },
   { name: "-P" },
+  { name: "--ref" },
 ];
+
+/**
+ * `--ref <rev>`: read the repo from that commit's git tree for the rest of the run. Returns the
+ * context with the cwd mapped into the tree (no disk realpath of the working tree).
+ */
+export function useRef(ctx: CommandContext, parsed: ParsedArgs): CommandContext {
+  const rev = flag(parsed, "--ref");
+  if (rev === undefined) return ctx;
+  const fs = openGitTree(ctx.cwd, rev);
+  setSourceFs(fs);
+  setHintRef(rev);
+  return { ...ctx, cwd: fs.ref!.cwd };
+}
+
+/** The header block of a `--ref` run: `ref: <rev> @ <short sha>`, plus where node_modules came from. */
+export function refHeader(): string | undefined {
+  const ref = sourceFs().ref;
+  if (!ref) return undefined;
+  return block({ ref: `${ref.rev} @ ${ref.sha.slice(0, 7)}`, ...(ref.nodeModulesRead ? { node_modules: "working tree (not in git)" } : {}) });
+}
 
 export interface TargetFilters {
   kind?: Kind;
@@ -231,8 +255,9 @@ export type PositionResolution =
 
 export function resolvePositionFile(cwd: string, file: string): string {
   const abs = resolve(cwd, file);
-  if (!existsSync(abs)) {
-    throw usageError(`file not found: ${file}`, ["paths are relative to the current directory"]);
+  if (!sourceFs().exists(abs)) {
+    const ref = sourceFs().ref;
+    throw usageError(ref ? `file not in ${ref.rev}: ${file}` : `file not found: ${file}`, ["paths are relative to the current directory"]);
   }
   return abs;
 }

@@ -8,7 +8,9 @@ import { callersCommand, CALLERS_HELP, refsCommand, REFS_HELP } from "./commands
 import { setupCommand, SETUP_HELP } from "./commands/setup.js";
 import type { CommandContext } from "./context.js";
 import { AxiError, exitCodeForError } from "./errors.js";
-import { renderErrorOutput, setJsonMode, toJson } from "./render.js";
+import { refHeader } from "./commands/common.js";
+import { diskFs, setSourceFs } from "./fs.js";
+import { out, renderErrorOutput, setHintRef, setJsonMode, toJson } from "./render.js";
 import { VERSION } from "./version.js";
 
 export const DESCRIPTION =
@@ -19,13 +21,14 @@ commands[8]:
   (none)=project overview, def, refs, callers, outline, impact, config, setup (opt-in session hooks)
 targets:
   name (save), member (User.save) or position (src/a.ts:42 or src/a.ts:42:7)
-flags[4]:
-  -P <tsconfig> (after the command; default nearest tsconfig.json), --json (anywhere), --help, -v/-V/--version
+flags[5]:
+  -P <tsconfig> (after the command; default nearest tsconfig.json), --ref <rev> (def/refs/callers/outline; read a git revision instead of the working tree), --json (anywhere), --help, -v/-V/--version
 examples:
   ts-axi
   ts-axi def User.save
   ts-axi refs src/models/user.ts:12
   ts-axi callers runSync --depth 2
+  ts-axi refs User.save --ref origin/main
   ts-axi outline src/models/user.ts
   ts-axi impact main...HEAD
   ts-axi refs --help
@@ -44,7 +47,12 @@ const COMMAND_HELP: Record<string, string> = {
 type Handler = (args: string[], ctx: CommandContext) => Promise<string>;
 
 function command(name: string, handler: Handler, ctx: CommandContext): (args: string[]) => Promise<string> {
-  return async (args) => (args.includes("-h") ? (COMMAND_HELP[name] ?? "").trimEnd() : handler(args, ctx));
+  return async (args) => {
+    if (args.includes("-h")) return (COMMAND_HELP[name] ?? "").trimEnd();
+    const result = await handler(args, ctx);
+    // After the handler: the node_modules note depends on what it read.
+    return out(refHeader(), result);
+  };
 }
 
 function formatError(error: unknown): { output: string; exitCode: number } {
@@ -104,6 +112,8 @@ export async function main(options: MainOptions = {}): Promise<void> {
     });
   } finally {
     setJsonMode(false);
+    setSourceFs(diskFs);
+    setHintRef(undefined);
   }
   if (!json) return;
   if (stdout === process.stdout) {
