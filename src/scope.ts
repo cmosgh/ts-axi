@@ -1,7 +1,7 @@
 // Scoped program for semantic commands in a workspace: seed files + their importers (syntactic
 // importer index), compiled with the seed's own tsconfig plus the workspace `paths`.
 import { dirname, join } from "node:path";
-import { existsSync } from "node:fs";
+import { sourceFs } from "./fs.js";
 import ts from "typescript";
 import { buildImporterIndex, createResolver, importerClosure, type ImporterIndex } from "./importers.js";
 import {
@@ -39,6 +39,7 @@ export function importerIndexFor(index: SyntacticIndex, workspace: Workspace, ex
   let built = byKey.get(key);
   if (!built) {
     const resolveSpec = createResolver(workspace, new Set([...workspace.sourceFiles, ...extra]));
+    sourceFs().prefetch(workspace.sourceFiles);
     built = buildImporterIndex(workspace.sourceFiles, (f) => index.text(f), resolveSpec, { maxFiles: IMPORTER_MAX_FILES, maxMs: IMPORTER_MAX_MS });
     byKey.set(key, built);
   }
@@ -61,7 +62,7 @@ export function compilerOptionsFor(seed: string, workspace: Workspace): ts.Compi
   }
   if (!options) {
     const base = join(workspace.root, "tsconfig.base.json");
-    const raw = existsSync(base) ? readJsonc(base)?.["compilerOptions"] : undefined;
+    const raw = sourceFs().exists(base) ? readJsonc(base)?.["compilerOptions"] : undefined;
     options = raw ? { ...IMPLICIT_COMPILER_OPTIONS, ...ts.convertCompilerOptionsFromJson(raw, dirname(base), base).options } : { ...IMPLICIT_COMPILER_OPTIONS };
   }
   const merged: ts.CompilerOptions = { ...options, noEmit: true, skipLibCheck: true };
@@ -101,7 +102,7 @@ export function planScope(
   const { workspace } = scope;
   const importers = hops > 0 ? importerIndexFor(index, workspace, extra) : undefined;
   const closure = importers ? importerClosure(importers, [...seeds, ...extra], hops) : { importers: [], barrels: [] };
-  const seedFiles = seeds.filter((s) => existsSync(s));
+  const seedFiles = seeds.filter((s) => sourceFs().exists(s));
   const rootNames = [...new Set([...seedFiles, ...closure.importers])];
   const options = compilerOptionsFor(seedFiles[0] ?? seeds[0] ?? join(workspace.root, "index.ts"), workspace);
   if (rootNames.some((f) => /\.[mc]?jsx?$/.test(f))) {

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { sourceFs } from "../fs.js";
 import { basename, dirname, join, relative, sep } from "node:path";
 import ts from "typescript";
 import { bool, flag, intFlag, parseArgs, parseFields, type ParsedArgs } from "../args.js";
@@ -100,6 +101,7 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+// Always the working tree: it is the "after" side of the diff (impact rejects --ref).
 function readText(abs: string): string | null {
   try {
     return readFileSync(abs, "utf8");
@@ -310,6 +312,7 @@ export function textualMatches(
   const files = [...semantic.projectFiles];
   const projectSet = new Set(files);
   walkExtra(opened.root, files);
+  sourceFs().prefetch(files);
   const rows: Unresolved[] = [];
   for (const abs of files) {
     const text = opened.index.text(abs);
@@ -391,6 +394,7 @@ export function textualCount(opened: Opened, needle: Needle, changeSet: Map<stri
   // State names are also written in templates (`ui-sref`), which the Project does not list.
   const candidates = onlyFile !== undefined ? [onlyFile] : [...project];
   if (token && onlyFile === undefined) walkExtra(opened.root, candidates);
+  sourceFs().prefetch(candidates);
   for (const abs of new Set(candidates)) {
     const text = opened.index.text(abs);
     if (text === undefined || !text.includes(name)) continue;
@@ -502,7 +506,7 @@ function specFilesHint(cwd: string, opened: Opened, skipped: Array<{ file: strin
   const dir = dirname(tsconfig);
   const name = basename(tsconfig);
   const order = name === "tsconfig.lib.json" || name === "tsconfig.app.json" ? ["tsconfig.json", "tsconfig.spec.json"] : ["tsconfig.spec.json", "tsconfig.json"];
-  const candidates = order.map((n) => join(dir, n)).filter((c) => c !== tsconfig && existsSync(c));
+  const candidates = order.map((n) => join(dir, n)).filter((c) => c !== tsconfig && sourceFs().exists(c));
   // Prefer the one that really includes a skipped spec file (an Nx tsconfig.json may only hold references).
   const includes = (c: string): boolean => {
     try {

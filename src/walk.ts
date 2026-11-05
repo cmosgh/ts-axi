@@ -1,9 +1,8 @@
 // The one file listing for every walk (implicit project, home count, workspace detection,
-// importer index, outside-project search): `git ls-files` inside a repo, else an fs walk with
-// one skip rule. Node builtins only: the home view imports it.
-import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, type Dirent } from "node:fs";
+// importer index, outside-project search): `git ls-files` inside a repo (the git tree under
+// `--ref`), else an fs walk with one skip rule. Node builtins only: the home view imports it.
 import { join, relative, sep } from "node:path";
+import { sourceFs } from "./fs.js";
 
 /** Build output, dependencies, caches and tool/editor state (agent worktrees live in `.claude/`). */
 export const SKIP_DIRS: ReadonlySet<string> = new Set([
@@ -12,7 +11,7 @@ export const SKIP_DIRS: ReadonlySet<string> = new Set([
 
 /** A directory below the root that holds its own `.git` (nested repo or worktree) is another checkout. */
 export function isNestedCheckout(dir: string, root: string): boolean {
-  return dir !== root && existsSync(join(dir, ".git"));
+  return dir !== root && sourceFs().exists(join(dir, ".git"));
 }
 
 export function skipDir(name: string, path: string, root: string): boolean {
@@ -31,6 +30,7 @@ export interface WalkOptions {
 
 /** Files below `root` (absolute paths) under the shared skip rule; `capped` when a bound stopped it. */
 export function walkFiles(root: string, options: WalkOptions): { files: string[]; capped: boolean } {
+  const fs = sourceFs();
   const files: string[] = [];
   const queue = [root];
   let capped = false;
@@ -40,18 +40,13 @@ export function walkFiles(root: string, options: WalkOptions): { files: string[]
       break;
     }
     const dir = options.breadthFirst ? queue.shift()! : queue.pop()!;
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
+    const entries = fs.readdir(dir);
     if (options.breadthFirst) entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
+      if (entry.isDirectory) {
         if (!skipDir(entry.name, path, root)) queue.push(path);
-      } else if (entry.isFile() && options.accept(entry.name)) {
+      } else if (entry.isFile && options.accept(entry.name)) {
         files.push(path);
       }
     }
@@ -68,21 +63,10 @@ export function byDepthThenPath(a: string, b: string): number {
  * Tracked + untracked-not-ignored files, repo-relative (one local, read-only `git ls-files` call):
  * git never descends into nested repos or worktrees, and gitignored dirs drop out. Undefined
  * when `root` is not a git checkout (`.git` dir, or file for a linked worktree) or git is missing.
+ * Under `--ref`: the files of the pinned tree.
  */
 export function gitFiles(root: string): string[] | undefined {
-  if (!existsSync(join(root, ".git"))) return undefined;
-  try {
-    const raw = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
-      cwd: root,
-      encoding: "utf8",
-      maxBuffer: 512 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    // A nested repo shows up as one `dir/` entry; deleted-but-tracked files are dropped by the caller's accept/exists check.
-    return [...new Set(raw.split("\0").filter((f) => f !== "" && !f.endsWith("/")))];
-  } catch {
-    return undefined;
-  }
+  return sourceFs().listFiles(root);
 }
 
 export interface Listing {
@@ -97,12 +81,13 @@ export interface Listing {
  * missing files dropped) or, outside git, the bounded fs walk.
  */
 export function listFiles(root: string, accept: (name: string) => boolean, bounds: Omit<WalkOptions, "accept" | "breadthFirst"> = {}): Listing {
+  const fs = sourceFs();
   const git = gitFiles(root);
   if (git) {
     const files = git
       .filter((f) => accept(f.slice(f.lastIndexOf("/") + 1)) && !f.split("/").some((seg) => SKIP_DIRS.has(seg)))
       .map((f) => join(root, f))
-      .filter((f) => existsSync(f))
+      .filter((f) => fs.exists(f))
       .sort();
     return { files, capped: false, listedBy: "git" };
   }

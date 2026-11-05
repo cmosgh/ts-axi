@@ -1,7 +1,7 @@
 // Template usages of AngularJS-style registrations: directives and components as kebab-case
 // elements/attributes, their bindings as attributes, controllers in `ng-controller`, filters
 // after `|`. One regex pass per template line, no HTML parsing.
-import { readFileSync } from "node:fs";
+import { sourceFs } from "./fs.js";
 import type { Declaration } from "./symbols.js";
 import { listFiles, toRel } from "./walk.js";
 
@@ -63,12 +63,13 @@ export interface TemplateFile {
 /** Template files of the repo root (git listing, else the bounded walk). */
 export function loadTemplates(root: string): TemplateFile[] {
   const files: TemplateFile[] = [];
-  for (const abs of listFiles(root, isTemplatePath).files) {
-    try {
-      files.push({ rel: toRel(root, abs), text: readFileSync(abs, "utf8") });
-    } catch {
-      // unreadable: skipped
-    }
+  const fs = sourceFs();
+  const listed = listFiles(root, isTemplatePath).files;
+  fs.prefetch(listed);
+  for (const abs of listed) {
+    const text = fs.readFile(abs);
+    // Unreadable: skipped.
+    if (text !== undefined) files.push({ rel: toRel(root, abs), text });
   }
   return files;
 }

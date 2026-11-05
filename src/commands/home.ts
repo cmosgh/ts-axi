@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { sourceFs } from "../fs.js";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { expectPositionals, flag, flags, parseArgs } from "../args.js";
@@ -28,17 +28,12 @@ interface Counted {
 
 /** Does `dir` hold a TS/JS source within `depth` levels (shared skip rule)? */
 function hasSources(dir: string, depth: number, root = dir): boolean {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return false;
-  }
+  const entries = sourceFs().readdir(dir);
   for (const entry of entries) {
-    if (entry.isFile() && SOURCE_EXT.test(entry.name)) return true;
+    if (entry.isFile && SOURCE_EXT.test(entry.name)) return true;
   }
   if (depth === 0) return false;
-  return entries.some((e) => e.isDirectory() && !skipDir(e.name, join(dir, e.name), root) && hasSources(join(dir, e.name), depth - 1, root));
+  return entries.some((e) => e.isDirectory && !skipDir(e.name, join(dir, e.name), root) && hasSources(join(dir, e.name), depth - 1, root));
 }
 
 /** Implicit project: every source below `root` from the shared listing (git, else a bounded fs walk). */
@@ -50,7 +45,7 @@ function findTsconfig(cwd: string): string | undefined {
   let dir = cwd;
   for (;;) {
     const candidate = join(dir, "tsconfig.json");
-    if (existsSync(candidate)) return candidate;
+    if (sourceFs().exists(candidate)) return candidate;
     const parent = dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;
@@ -87,7 +82,7 @@ function resolveTsconfig(cwd: string, settings: Settings): string | undefined {
     // -P is relative to cwd, the .ts-axi.json value to the repo root.
     const base = settings.sources.project === "flag" ? cwd : settings.root;
     const path = resolve(base, settings.project);
-    if (!existsSync(path) || !statSync(path).isFile()) {
+    if (!sourceFs().isFile(path)) {
       throw usageError(`tsconfig not found: ${settings.project}`, [
         settings.sources.project === "flag"
           ? "Pass an existing file to -P"
