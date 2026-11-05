@@ -242,6 +242,8 @@ export function detectWorkspace(root: string): Workspace {
   const { files, listedBy } = listWorkspaceFiles(root);
   const dirsWith = (fileName: string): string[] =>
     files.filter((f) => f === fileName || f.endsWith(`/${fileName}`)).map((f) => (f === fileName ? "" : f.slice(0, -fileName.length - 1)));
+  // One batch for the per-project manifests read below (one git call each under --ref otherwise).
+  sourceFs().prefetch(files.filter((f) => /(?:^|\/)(?:project\.json|package\.json|tsconfig[^/]*\.json)$/.test(f)).map((f) => join(root, f)));
   const packageDirs = dirsWith("package.json");
   const signals: WorkspaceKind[] = [];
   const byKind = new Map<WorkspaceKind, WorkspaceProject[]>();
