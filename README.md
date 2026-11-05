@@ -86,7 +86,7 @@ The hook runs `ts-axi` with no arguments: it reads only the file tree and git st
 | `config` | Show effective settings with their source; `config set <key> <value>` and `config unset <key>` write `.ts-axi.json` |
 | `setup <hooks\|status\|uninstall>` | Opt-in SessionStart hook for Claude Code, Codex and OpenCode that runs the home view at session start. `--project` for the current repository only |
 
-`ts-axi <command> --help` prints a concise, complete flag reference. `-P <tsconfig>` selects a project on any command that may analyse types; `--json` prints the decoded payload.
+`ts-axi <command> --help` prints a concise, complete flag reference. `-P <tsconfig>` selects a project on any command that may analyse types; `--ref <rev>` answers `def`, `refs`, `callers` and `outline` at a git revision ([below](#reading-another-revision---ref)); `--json` prints the decoded payload.
 
 ### A review, end to end
 
@@ -196,6 +196,31 @@ scope: nx workspace - 30 of 5433 files (seeds 1; importers 29)
 
 Files are listed with `git ls-files` (tracked plus untracked, gitignore applied), so nested worktrees and ignored copies are never analysed. Outside git, a directory walk skips `node_modules`, build output, `.claude`, `.cursor`, `.idea`, `.vscode` and any nested checkout.
 
+## Reading another revision (`--ref`)
+
+`def`, `refs`, `callers` and `outline` take `--ref <rev>` (a branch, tag, `origin/main`, `HEAD~3`, a SHA) and answer from that commit's tree, read straight from git objects. Nothing is checked out, written or fetched, and the working tree has no effect on the answer: a triage agent can ask about the deployed code while the checkout is on another branch or dirty.
+
+```sh
+ts-axi callers Cart.total --ref origin/main
+```
+
+```
+ref: origin/main @ 5474e0f
+symbol: Cart.total
+...
+help[1]:
+  - Run `ts-axi refs src/lib/cart.ts:32 --ref origin/main` for every Reference (not only calls)
+```
+
+- The rev is resolved once to a SHA (`ref: <rev> @ <sha>`), so a `git fetch` during the run cannot mix versions. Paths in the output look as they do without `--ref`, and every follow-up hint keeps `--ref`.
+- A file that is not in the revision is absent even if it exists locally, and a file deleted locally is still there: `file not in origin/main: src/new.ts`.
+- `node_modules` is not in git, so dependency types come from the working tree; the output says `node_modules: working tree (not in git)` when it read any.
+- A partial clone never fetches: a blob that is not available locally is a `GIT_ERROR` (`git fetch` or a full clone fixes it). Fetch the ref yourself first if it may be stale.
+- `.ts-axi.json` is read from the working tree, like `--test-glob`.
+- `impact` already compares git revisions (`ts-axi impact origin/main...HEAD`) and rejects `--ref`, as do `config` and `setup`.
+
+Cost: the tree listing and one batched blob read add about 0.1 s on a small repo and 0.1-0.3 s on a ~5k-file Nx monorepo.
+
 ## Test files
 
 A file counts as a test by path pattern. Defaults: `**/*.test.*`, `**/*.spec.*`, `**/__tests__/**`, `**/test/**`, `**/tests/**`, `**/e2e/**`, `**/spec/**`, `**/test.*`, `**/*_test.*`. The home view shows `test_globs` and `test_files` so a wrong rule is visible.
@@ -236,7 +261,7 @@ corepack pnpm install
 corepack pnpm run check   # typecheck, tests, build, skill freshness
 ```
 
-`skills/ts-axi/SKILL.md` is generated: `corepack pnpm run build:skill`. See `PLAN.md` for the spec, `GLOSSARY.md` for the vocabulary and `docs/adr/` for the two engine decisions (TypeScript LanguageService over ts-morph / tree-sitter; importer subgraph over a configured project list).
+`skills/ts-axi/SKILL.md` is generated: `corepack pnpm run build:skill`. See `PLAN.md` for the spec, `GLOSSARY.md` for the vocabulary and `docs/adr/` for the design decisions (TypeScript LanguageService over ts-morph / tree-sitter; importer subgraph over a configured project list; `--ref` over git objects instead of a worktree).
 
 ### Tests
 
@@ -244,6 +269,7 @@ corepack pnpm run check   # typecheck, tests, build, skill freshness
 | --- | --- | --- |
 | `test/unit.test.ts`, `test/workspace.test.ts` | `pnpm test` | target parsing, signatures, change classification, diff parsing, settings, glob matching, reference classification, workspace detection, import resolution |
 | `test/commands.test.ts` | `pnpm test` | the whole CLI through `main()` over five fixtures copied to temp git repos: `test/fixtures/project` (TS, interface + implementations, barrel, JS consumer, `any` access), `test/fixtures/workspace` (Nx + pnpm workspace, `paths`, references-only tsconfigs), `test/fixtures/legacy-js` (AngularJS, Meteor, prototype, IIFE, CommonJS), `test/fixtures/commonjs` (`require('..')` shim, expando methods, `.d.ts` twin), `test/fixtures/esm-js` (`"type": "module"`, `index.js` + `index.d.ts`) |
+| `test/ref.test.ts`, `test/ref-leak.test.ts`, `test/gittree.test.ts` | `pnpm test` | `--ref`: answers on a poisoned working tree equal a clean checkout (four fixtures), no read below the repo root bypasses the git tree (`node:fs` and `ts.sys` spied), tree listing, blob batches, symlinks, submodules, bad revisions |
 | `test/integration/*.test.ts` | `pnpm run test:integration` | the built binary against the vendored Astro + React sample in `test/integration/sample` (installs its own dependencies once; copied to a temp git repo per run, see `test/integration/README.md`) |
 
 CI runs the first two on Node 22 and 24, the built CLI on Node 20, and the integration suite on Node 24.
