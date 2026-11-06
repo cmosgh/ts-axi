@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const SAMPLE = join(HERE, "sample");
-const CLI = join(REPO, "dist", "bin", "ts-axi.js");
+export const CLI = join(REPO, "dist", "bin", "ts-axi.js");
 const SKIP_COPY = new Set(["node_modules", "dist", ".astro"]);
 
 export interface CliResult {
@@ -60,15 +60,21 @@ async function gitIn(dir: string, args: string[]): Promise<string> {
  */
 export async function prepareSample(): Promise<Sample> {
   await ensureSampleModules();
+  return prepareCopy(SAMPLE, join(SAMPLE, "node_modules"));
+}
+
+/** `prepareSample()` for a fixture without dependencies, e.g. `test/fixtures/legacy-js`. */
+export function prepareFixture(src: string): Promise<Sample> {
+  return prepareCopy(src);
+}
+
+async function prepareCopy(src: string, modules?: string): Promise<Sample> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "ts-axi-sample-")));
-  cpSync(SAMPLE, dir, {
+  cpSync(src, dir, {
     recursive: true,
-    filter: (src) => {
-      const rel = relative(SAMPLE, src);
-      return !SKIP_COPY.has(rel.split(sep)[0] ?? "");
-    },
+    filter: (path) => !SKIP_COPY.has(relative(src, path).split(sep)[0] ?? ""),
   });
-  symlinkSync(join(SAMPLE, "node_modules"), join(dir, "node_modules"), "dir");
+  if (modules) symlinkSync(modules, join(dir, "node_modules"), "dir");
   await gitIn(dir, ["init", "-q", "-b", "main"]);
   await gitIn(dir, ["add", "-A"]);
   await gitIn(dir, ["commit", "-q", "-m", "base"]);

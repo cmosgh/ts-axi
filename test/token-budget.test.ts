@@ -6,15 +6,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { committed, LEGACY_FIXTURE, runIn } from "./helpers.js";
+import { estimateTokens } from "./tokens.js";
 
 const BASELINE = join(dirname(fileURLToPath(import.meta.url)), "token-budget.json");
 const TOLERANCE = 0.1;
 const UPDATE = process.env["TOKEN_BUDGET_UPDATE"] === "1";
-
-/** ~4 characters per token: a stable, dependency-free estimate (tracks BPE counts closely enough for regressions). */
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
 
 /** Drop what varies per run: timings and commit SHAs. */
 function normalize(stdout: string): string {
