@@ -811,7 +811,22 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(def.stdout).toContain("file: lib/services/access-guard.js\nline: 6\nkind: method");
     expect((await legacy("def", "makeItemDeps.canReadItem")).stdout).toContain("line: 6\nkind: method");
     expect((await legacy("def", "canreaditem", "--fuzzy")).stdout).toContain("file: lib/services/access-guard.js\nline: 6");
-    expect(toon((await legacy("def", "retries")).stdout)).toMatchObject({ matches: 0 });
+  });
+
+  it("a name with no Declaration: def and refs hint at its textual matches, refs --grep lists them", async () => {
+    const def = toon((await legacy("def", "retries")).stdout);
+    expect(def).toMatchObject({ matches: 0 });
+    expect(def["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs retries --grep` for 1 textual matches"]));
+    expect(toon((await legacy("refs", "retries")).stdout)["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs retries --grep` for 1 textual matches"]));
+    const grep = await legacy("refs", "retries", "--grep");
+    expect(grep.exitCode).toBe(0);
+    expect(toon(grep.stdout)).toMatchObject({
+      matches: 0,
+      note: "no declaration found - textual matches only",
+      unresolved: [{ file: "lib/services/access-guard.js", line: 12, context: "retries: 2," }],
+    });
+    expect(toon((await legacy("refs", "noSuchWordAnywhere", "--grep")).stdout)).toMatchObject({ matches: 0, unresolved: 0 });
+    expect(toon((await legacy("def", "noSuchWordAnywhere")).stdout)["help"]).not.toEqual(expect.arrayContaining([expect.stringContaining("--grep")]));
   });
 
   it("def finds a controller by its registered name", async () => {

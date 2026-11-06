@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { importerClosure } from "../importers.js";
-import { isPlainLocal, isTextualCandidate, isUntyped, textualCount, textualNeedle, textualHint, textualLine, textualMatches, type TextualCount, type Unresolved } from "./impact.js";
+import { isPlainLocal, isTextualCandidate, isUntyped, textualCount, textualNeedle, textualHint, textualLine, textualMatches, textualScan, textualScanHint, type TextualCount, type Unresolved } from "./impact.js";
 import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
@@ -153,10 +153,28 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
           ]),
         );
       }
+      // No Declaration, but the name may still be written: an untyped property set up elsewhere.
+      const text = f.fuzzy ? [] : textualScan(opened, target.member ?? target.name);
+      if (show.grep) {
+        return out(
+          block({
+            ...warning,
+            matches: 0,
+            note: "no declaration found - textual matches only",
+            unresolved: text.length === 0 ? 0 : text.slice(0, limit),
+            ...(text.length > limit ? { unresolved_total: text.length } : {}),
+          }),
+          helpBlock([
+            ...(text.length > limit ? [`Showing ${limit} of ${text.length}; run \`ts-axi refs ${label} --grep --limit ${Math.min(MAX_LIMIT, text.length)}\` for more`] : []),
+            `Run \`ts-axi def ${label} --fuzzy\` for substring matches`,
+          ]),
+        );
+      }
       const suggested = suggestions(opened, target);
       return out(
         block({ ...warning, matches: 0, ...(suggested.length > 0 ? { did_you_mean: suggested } : {}) }),
         helpBlock([
+          ...(text.length > 0 ? [textualScanHint(label, text.length)] : []),
           ...suggested.slice(0, 2).map((s) => `Run \`ts-axi ${name} ${s}\``),
           ...(f.fuzzy ? [] : [`Run \`ts-axi def ${label} --fuzzy\` for substring matches`]),
         ]),

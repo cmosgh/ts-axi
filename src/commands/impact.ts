@@ -334,6 +334,27 @@ export function textualMatches(
   return rows.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
+/** Whole-word matches of `name` in the Project files, one row per line: the fallback when no Declaration matches. */
+export function textualScan(opened: Opened, name: string): Unresolved[] {
+  const rows: Unresolved[] = [];
+  sourceFs().prefetch(opened.index.files);
+  for (const abs of opened.index.files) {
+    const text = opened.index.text(abs);
+    if (text === undefined || !text.includes(name)) continue;
+    let last = 0;
+    for (const m of wordMatches(text, name)) {
+      if (m.line === last) continue;
+      last = m.line;
+      rows.push({ file: opened.index.rel(abs), line: m.line, context: contextOf(lineOf(text, m.line), m.col) });
+    }
+  }
+  return rows.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+}
+
+export function textualScanHint(label: string, matches: number): string {
+  return `Run \`ts-axi refs ${label} --grep\` for ${matches} textual matches`;
+}
+
 /** Whether a whole-word count of the name says anything: not for router-called or by-name-injected members (`injected`). */
 export function isTextualCandidate(decl: Declaration | undefined): boolean {
   return decl?.injected !== true;

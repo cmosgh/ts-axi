@@ -1,6 +1,7 @@
 import { bool, expectPositionals, flag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { semanticFor } from "../scope.js";
+import { textualScan, textualScanHint } from "./impact.js";
 import { block, fenced, helpBlock, out } from "../render.js";
 import { isFunctionLike, kindFromScriptElement, parseTarget, type Declaration, type SymbolGroup } from "../symbols.js";
 import {
@@ -109,7 +110,8 @@ export async function defCommand(args: string[], ctx: CommandContext): Promise<s
   if (groups.length === 1) return detail(opened, groups[0]!.decls, full, label);
   if (groups.length === 0) {
     const suggested = suggestions(opened, target);
-    const help = suggested.slice(0, 2).map((s) => `Run \`ts-axi def ${s}\``);
+    const text = f.fuzzy ? 0 : textualScan(opened, target.member ?? target.name).length;
+    const help = [...(text > 0 ? [textualScanHint(label, text)] : []), ...suggested.slice(0, 2).map((s) => `Run \`ts-axi def ${s}\``)];
     if (!f.fuzzy) help.push(`Run \`ts-axi def ${label} --fuzzy\` for substring matches`);
     if (f.kind || f.in.length > 0 || f.exported) help.push(`Drop --kind / --in / --exported to widen the search`);
     return out(
