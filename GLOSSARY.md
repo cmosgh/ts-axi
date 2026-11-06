@@ -57,6 +57,10 @@ A Declaration touched by a diff, with one of these classes:
 
 For one Change set: every Change, and for each changed Symbol the References outside the Change set, grouped by file, with Test files counted separately.
 
+## Anchor
+
+A `file:line` (or `file:start-end`) where a review comment is attached, on one side of a diff: the new file, or the old one for a comment on removed lines. An Anchor is valid when the diff shows every one of its lines in a single hunk (an added, removed or context line of that side), since only shown lines can carry an inline comment. Its stable key is the innermost Declaration holding it, which survives line shifts between pushes.
+
 ## Blind spot
 
 A use of a changed Symbol that cannot be followed to a Symbol identity: access through `any`, a dynamic string key, reflection. Reported, never silently dropped.

@@ -45,6 +45,7 @@ Scope: with no `-P` and no `.ts-axi.json` `project`, a multi-project workspace (
 | `callers <target>` | semantic | Call-hierarchy incoming calls of a function-like Symbol, same shape as `refs` plus `caller` (the enclosing function/method name per row). `--depth N` (1..3): levels > 1 print `file:count` per caller, no locations. |
 | `outline <file>` | syntactic | Top-level Declarations in source order, class members nested: `decls[n]{line,kind,name,exported,signature}`. `--exports` keeps exported only. Multiple files allowed (glob). |
 | `impact [<git-range> \| -]` | semantic | See below. |
+| `anchor [<git-range> \| - \| --staged] <file:line[-end]>...` | syntactic | See below. |
 | `config` | - | `config` prints effective settings with their source (`default`, `.ts-axi.json`, `flag`); `config set <key> <value> [--replace]`, `config unset <key>` write `.ts-axi.json` at the repo root (idempotent, no `--confirm`). Keys: `test-globs` (repeatable/additive unless `--replace`), `project`. |
 
 Global flags: `--json` (decoded TOON payload, like mysql-axi), `--help`/`-h` per command, `-v/--version` (fast path), `-P <tsconfig>` on every command that may go semantic, `--ref <rev>` on `def`, `refs`, `callers`, `outline`.
@@ -95,9 +96,23 @@ Via References (GLOSSARY): the LanguageService resolves a class member through t
 
 `--depth N` (1..3): for N > 1 add `callers_depth2[n]{file,count}` etc. (counts only).
 
+`--size` (opt-in in text and `--json` alike) adds `size{files,hunks,lines_added,lines_removed,patch_chars,exported_signature_changes,removed_symbols}` from the parsed diff and the classification, with no extra git call. For a git source `hunks` is counted at zero context (impact diffs with `-U0`; nearby changes merge into one hunk at `-U3`), for `-` as given; untracked files count as added (one hunk each) and are not in `patch_chars` (the length of the diff text). Routing rules on these numbers stay in the caller.
+
 `blind_spots[n]{symbol,reason}`: the checker found a property access on `any`/`unknown` with the changed member's name, an element access with a string literal of that name, or the Symbol is reached by `export *` that the checker could not follow. Never a textual fallback by default. `--grep` adds `unresolved[n]{file,line,context}`: textual whole-word occurrences of changed names that are not References (max 20 rows).
 
 `refs`/`callers` with `matches: 0` under an explicit `-P` or `.ts-axi.json` `project`: a bounded syntactic walk of the repo root outside the Project (same caps as the home view, stops at 3 hits) prints `found_outside_project[n]{file,line}` and a `hint` naming the nearest tsconfig of the first hit, instead of suggesting `--fuzzy`. In `impact`, Test files skipped as `not in the Project` (a `tsconfig.lib.json`/`tsconfig.app.json` that excludes specs) add a help line naming the sibling tsconfig (`tsconfig.json`, else `tsconfig.spec.json`, preferring one that includes them).
+
+### `anchor`
+
+`ts-axi anchor [<git-range> | - | --staged] <file:line[-end]>... [--side new|old] [--context <n>] [--fields ...]` checks review-comment Anchors (GLOSSARY): an inline comment only lands on a line the diff shows.
+
+- **Diff source**: as `impact` (none = working tree vs HEAD with untracked files as added, `--staged`, a range, `-`). Git sources run `git diff -U<n> --no-color --no-ext-diff -M` with `--context 3` by default (what Bitbucket and GitHub show); `-` uses the diff as given and rejects `--context`. `bb-axi pr diff <id> --raw | ts-axi anchor - ...` is the PR review path. The first positional is the source when it is `-` or does not look like `path:line`; a non-anchor after it is a usage error whose hint puts the source first; `path:line:col` is rejected.
+- **Sides**: `--side new` (default) checks after-file lines (added or context); `--side old` before-file lines (removed or context), matched by the old path of a rename. Paths are repo-relative (a cwd-relative path from a subdirectory is tried too).
+- **Validity**: every line of the anchor is shown in one hunk (`in_diff`) and lies within the line count of that side (`in_file`; text read with `git show <rev>:<path>`, the working tree for none / `-` / a single-rev range, the index for `--staged`). `ok` = both.
+- **Rows**: `anchors[n]{anchor,ok,reason,symbol}`; `--fields in_diff,in_file,nearest,change,other_line` (or `all`). `reason` is `-` when ok, else `not in diff - nearest <file:a-b>`, `past end of file (<n> lines)`, `removed line - use --side old` (new side; the old side removed that line number), `added line - use --side new` (the reverse), `crosses hunk boundary - hunk <file:a-b>`, `file added - use --side new`, `file deleted - use --side old`, `file not in diff`, `binary`. `nearest` is the closest hunk's shown range on that side (what the comment can move to). `symbol` is `qualifiedName#kind` of the smallest Declaration spanning the anchor (syntactic: `collectDeclarations`, no LanguageService), `file_level` outside any, `-` for non-TS/JS files or unknown text. `change` is that Symbol's `classifyFile` class in this diff, else `-`. `other_line` is the context line's number on the other side.
+- **Stdin consistency**: the checkout must be the diff's after side; a file whose hunks do not reverse-apply to it has unknown text (`symbol: -`, `in_file: -`) and the output warns with a count.
+- **Exit codes**: 0 every anchor ok, 3 `ANCHOR_INVALID` when any is not (the output still prints in full), 2 usage, 1 git.
+- No `--ref` (anchors are about a diff) and no `-P` (no Project is built).
 
 Test files: default globs `**/*.test.*`, `**/*.spec.*`, `**/__tests__/**`, `**/test/**`, `**/tests/**`, `**/e2e/**`, `**/spec/**`, `**/test.*`, `**/*_test.*`; `.ts-axi.json` `testGlobs` is added to the defaults (or replaces them with `"testGlobsReplace": true`); `--test-glob <glob>` (repeatable) adds at run time. The home view shows `test_globs: <n>` and `test_files: <n>` so a wrong rule is visible.
 
@@ -116,13 +131,13 @@ Located at the git root (or cwd when not a repo). Unknown keys → `VALIDATION_E
 - Numbers stay numbers. Paths are repo-root-relative with `/`. No commas, colons or double quotes in TOON string values where avoidable (signatures may contain them: they are quoted by the encoder, accepted).
 - Every result ends with a `help` block of concrete next commands with real values filled in (`ts-axi refs src/a.ts:42`, `ts-axi def User.save`).
 - Empty states are definitive: `matches: 0`, `refs_total: 0`, `changes: 0`, exit 0.
-- Exit codes: 0 ok/empty, 2 usage or validation, 1 internal failure (`UNKNOWN`) or git failure (`GIT_ERROR`).
+- Exit codes: 0 ok/empty, 2 usage or validation, 1 internal failure (`UNKNOWN`) or git failure (`GIT_ERROR`), 3 `anchor` with an anchor that is not commentable (`ANCHOR_INVALID`).
 
 ## Tests
 
 - `test/unit.test.ts`: target parsing, signature normalisation, change classification, diff parsing, test-glob matching, config merge.
 - `test/workspace.test.ts`: workspace detection per kind, file walks (nested checkouts, tool dirs, linked worktree root), specifier resolution and barrel hops, the large implicit project.
-- `test/commands.test.ts`: whole CLI through `main()` against `test/fixtures/project/`, `test/fixtures/legacy-js/` (AngularJS registrations, ui-router states, directive bindings, two templates), `test/fixtures/commonjs/` (CJS shim, expando, `.d.ts` twin), `test/fixtures/esm-js/` (ESM `index.js` + `index.d.ts`) and `test/fixtures/workspace/` (a synthetic Nx + pnpm workspace: `libs/shared` barrel and `paths` alias, two services, an app) (a small synthetic TS project: a few modules, a class with members, a barrel re-export, a test file, a `.js` file, an `any` access as a blind spot). `impact` tests copy the fixture to a temp dir, `git init`, commit, edit, and run. Fixture names are synthetic.
+- `test/commands.test.ts`: whole CLI through `main()` against `test/fixtures/project/`, `test/fixtures/legacy-js/` (AngularJS registrations, ui-router states, directive bindings, two templates), `test/fixtures/commonjs/` (CJS shim, expando, `.d.ts` twin), `test/fixtures/esm-js/` (ESM `index.js` + `index.d.ts`) and `test/fixtures/workspace/` (a synthetic Nx + pnpm workspace: `libs/shared` barrel and `paths` alias, two services, an app) (a small synthetic TS project: a few modules, a class with members, a barrel re-export, a test file, a `.js` file, an `any` access as a blind spot). `anchor` tests build their own temp repo (two hunks, a rename, added, deleted, binary and non-ASCII files). `impact` tests copy the fixture to a temp dir, `git init`, commit, edit, and run. Fixture names are synthetic.
 - `pnpm run check` must pass on Node 22/24; the built CLI runs on Node 20.
 
 ## Phases
@@ -133,4 +148,5 @@ Located at the git root (or cwd when not a repo). Unknown keys → `VALIDATION_E
 4. Unit + command tests (`pnpm test`) and the opt-in integration suite over the vendored Astro sample (`pnpm run test:integration`, `test/integration/README.md`) (done).
 5. Workspace detection, importer-subgraph scope, references-only tsconfig expansion, git-based file listing (done).
 6. `--ref <rev>` over git objects, the `sourceFs()` seam, poisoned-tree and no-leak tests (done).
-7. Phase 2 ideas (not now): daemon/cache, vitest/jest config suggestion, token benchmark like mysql-axi.
+7. `anchor` and `impact --size` for the PR review loop (done).
+8. Phase 2 ideas (not now): daemon/cache, vitest/jest config suggestion, token benchmark like mysql-axi.
