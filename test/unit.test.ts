@@ -954,6 +954,16 @@ describe("classifyReferenceGroups", () => {
     expect(keys(c.direct)).toEqual(["alias-use"]);
   });
 
+  it("a mock mapped type's extra group defined at the target is direct; a same-named sibling stays dropped", () => {
+    const svc = group("s", "ItemService.findItem", [ref("s-decl", { isDefinition: true, atDefinition: true }), ref("real-call")]);
+    const mocked = group("s", "ItemService.findItem", [ref("s-decl", { atDefinition: true }), ref("mock-setup"), ref("mock-expect")]);
+    const other = group("o", "OtherService.findItem", [ref("o-decl", { atDefinition: true }), ref("other-call")]);
+    const c = classifyReferenceGroups([svc, mocked, other], 0);
+    expect(keys(c.direct).sort()).toEqual(["mock-expect", "mock-setup", "real-call"]);
+    expect(keys(c.declarations)).toEqual(["s-decl"]);
+    expect(keys(c.dropped).sort()).toEqual(["o-decl", "other-call"]);
+  });
+
   it("a plain function keeps every group direct and dedupes positions by the best bucket", () => {
     const fn = group("f", "parse", [ref("f-decl", { isDefinition: true }), ref("use")], { member: false });
     const alias = group("a", "parseList", [ref("use"), ref("alias-use")], { member: false });

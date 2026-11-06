@@ -57,7 +57,8 @@ const RANK: Record<Bucket, number> = { direct: 0, declaration: 1, implementation
  * Rules: the target group is direct. When the target is a class/interface member, a group it
  * implements/overrides (a base) is via, minus Declarations and `super` calls; a group that
  * implements/overrides the target is an implementation (its Declaration) or via (its uses);
- * any other member group is a sibling and dropped. Non-member groups (import aliases) are direct.
+ * any other member group is a sibling and dropped. Non-member groups (import aliases) and groups
+ * defined at the target itself (mock mapped types) are direct.
  */
 export function classifyReferenceGroups<R extends RefDescriptor>(groups: readonly GroupDescriptor<R>[], targetIndex: number): Classified<R> {
   const target = groups[targetIndex];
@@ -68,7 +69,8 @@ export function classifyReferenceGroups<R extends RefDescriptor>(groups: readonl
   };
   const bases = new Set(target?.bases ?? []);
   groups.forEach((group, i) => {
-    const isTarget = i === targetIndex;
+    // Mock shapes (`{ [K in keyof T]: … } & T`) come back as extra groups defined at the target itself.
+    const isTarget = i === targetIndex || (target !== undefined && group.key === target.key);
     const relation = isTarget || !target?.member || !group.member
       ? "direct"
       : bases.has(group.key)
