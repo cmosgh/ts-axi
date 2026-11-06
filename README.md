@@ -82,7 +82,8 @@ The hook runs `ts-axi` with no arguments: it reads only the file tree and git st
 | `refs <target>` | References of one symbol, grouped by file, with test counts. A class member that implements an interface (or overrides a base) member counts only its direct References; calls through the interface are `via_interface: n (Iface.member)`, sibling implementations are dropped, and an interface member reports `implementations: n`. `--limit`, `--kind calls`, `--via` (via rows with a `via` column), `--implementations` |
 | `callers <target>` | Incoming calls of a function-like symbol, split the same way (`via_interface`, `--via`). `--depth 1..3` |
 | `outline <file>` | Top-level declarations in source order, class members nested: `{line,kind,name,signature}` (`{at,kind,name,signature}` over several files). `--exports`, `--fields exported` |
-| `impact [<git-range> \| -]` | Declarations changed by the working tree (untracked files included; `--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), riskiest first: change class (`signature`, `removed`, `type`, `added`, `body`, `modified`), References outside the change set (direct only), a `via` count of calls through an interface or base member (`--via` lists them), test-file counts, `notes` (a signature change of a member that implements an interface member), `blind_spots`, `local_only`, `file_level` and `skipped` (non-TS files in the diff). `--limit`, `--depth 2..3`, `--grep`. Rows default to `{symbol,change,at,refs_outside}`; `--fields kind,exported,refs_total,via,files,tests` (or `all`) adds columns. Analyses the current checkout |
+| `impact [<git-range> \| -]` | Declarations changed by the working tree (untracked files included; `--staged`), a git range (`main...HEAD`) or a unified diff on stdin (`bb-axi pr diff 42 --raw \| ts-axi impact -`), riskiest first: change class (`signature`, `removed`, `type`, `added`, `body`, `modified`), References outside the change set (direct only), a `via` count of calls through an interface or base member (`--via` lists them), test-file counts, `notes` (a signature change of a member that implements an interface member), `blind_spots`, `local_only`, `file_level` and `skipped` (non-TS files in the diff). `--limit`, `--depth 2..3`, `--grep`. Rows default to `{symbol,change,at,refs_outside}`; `--fields kind,exported,refs_total,via,files,tests` (or `all`) adds columns. `--size` adds a `size` block (files, hunks at zero context, lines added and removed, patch characters, exported signature changes, removed symbols) for routing a review by diff size. Analyses the current checkout |
+| `anchor [<git-range> \| - \| --staged] <file:line[-end]>...` | Checks review-comment anchors: a line is commentable when the diff shows it (added or context; removed or context with `--side old`). Rows are `{anchor,ok,reason,symbol}`: a reason with the nearest hunk when not, and the enclosing Declaration (`Cart.total#method`) as a stable key for the finding. Git sources diff at `--context 3` (what Bitbucket and GitHub show); a stdin diff is used as given. `--fields in_diff,in_file,nearest,change,other_line` (or `all`). Exit 3 when any anchor is not ok, with the full output |
 | `config` | Show effective settings with their source; `config set <key> <value>` and `config unset <key>` write `.ts-axi.json` |
 | `setup <hooks\|status\|uninstall>` | Opt-in SessionStart hook for Claude Code, Codex and OpenCode that runs the home view at session start. `--project` for the current repository only |
 
@@ -148,6 +149,30 @@ help[4]:
   - "Run `ts-axi def src/lib/query.ts:1` for the one in src/lib/query.ts"
   ...
 ```
+
+### Anchoring review comments
+
+An inline comment only lands when the review tool shows its line in the diff. Check the anchors against the diff the tool renders before posting:
+
+```sh
+bb-axi pr diff 42 --raw | ts-axi anchor - src/a.ts:12 src/b.ts:40-44
+```
+
+```
+base: stdin diff
+head: working tree
+side: new
+anchors[2]{anchor,ok,reason,symbol}:
+  "src/a.ts:12",true,"-",Cart.total#method
+  "src/b.ts:40-44",false,not in diff - nearest 51-58,formatPrice#function
+invalid: 1
+help[3]:
+  - "Move src/b.ts:40-44 into src/b.ts:51-58 or post it as a general comment"
+  - exit 3 (ANCHOR_INVALID) - 1 of 2 anchors cannot be commented; fix or drop them before posting
+  - "Run `<diff> | ts-axi anchor - src/b.ts:40-44 --fields all` for in_diff, in_file, nearest, change and other_line"
+```
+
+The exit code is 3 when any anchor is not commentable, so a script can gate on it. `--side old` checks lines of the before file (comments on removed lines); a new-side anchor on a removed line says `removed line - use --side old`. With a stdin diff, `symbol` and `in_file` come from the working tree, so check out the PR head first; a mismatch is reported as a warning.
 
 ### Interfaces are not conflated
 

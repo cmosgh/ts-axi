@@ -5,7 +5,8 @@ import { DESCRIPTION } from "./cli.js";
 export const SKILL_DESCRIPTION =
   "Navigate TypeScript and JavaScript code and measure change impact through the ts-axi CLI - find where a symbol is declared, " +
   "list its references and callers, outline a file, and see which other code a diff affects. Use before reading many files to find " +
-  "callers or usages of a function, class or type; use `ts-axi impact` when reviewing a diff, a pull request or your own uncommitted changes.";
+  "callers or usages of a function, class or type; use `ts-axi impact` when reviewing a diff, a pull request or your own uncommitted changes, " +
+  "and `ts-axi anchor` to check that review-comment file:line anchors are in the diff before posting them.";
 
 // Hard cap so a regeneration cannot re-inflate the stub with CLI-owned
 // guidance. The home view and --help output are the source of truth.
