@@ -783,6 +783,54 @@ describe("nested declarations", () => {
     expect(all.find((d) => d.name === "store" && d.nameless)?.fullSignature).toBe("factory store($http)\n['$http']");
   });
 
+  it("self = this members and factory objects name nested functions by identifier, once each", () => {
+    const text = [
+      "angular.module('m').service('store', store).factory('api', api).controller('Ctrl', function () {",
+      "  let vm = this;",
+      "  vm.go = go;",
+      "  function go() {}",
+      "});",
+      "function store($http) {",
+      "  const self = this;",
+      "  self.load = load;",
+      "  self.drop = drop;",
+      "  self.http = $http;",
+      "  self.cache = {};",
+      "  self.data = data;",
+      "  return { load };",
+      "  function load(id) {}",
+      "  var drop = function () {};",
+      "  var data = [];",
+      "}",
+      "function api() {",
+      "  var service = { get: get, put };",
+      "  service.del = del;",
+      "  return service;",
+      "  function get() {}",
+      "  function put(x) {}",
+      "  function del() {}",
+      "}",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual([
+      "function store exported nameless",
+      "function api exported nameless",
+      "function Ctrl exported nameless",
+      "method Ctrl.go exported",
+      "function store",
+      "method store.load exported",
+      "method store.drop exported",
+      "function api",
+      "method api.get exported",
+      "method api.put exported",
+      "method api.del exported",
+    ]);
+    const all = collectDeclarations(parseSource("src/a.js", text), "src/a.js");
+    expect(all.find((d) => d.qualifiedName === "store.load")).toMatchObject({ line: 14, nameLine: 14, endLine: 14, aliasLine: 8, signature: "function load(id)" });
+    expect(all.find((d) => d.qualifiedName === "store.drop")).toMatchObject({ line: 15, aliasLine: 9, signature: "var drop = function ()" });
+    expect(all.find((d) => d.qualifiedName === "api.put")).toMatchObject({ line: 23, aliasLine: 19 });
+  });
+
   it("object-literal holders, prototype and static assignments, this-members", () => {
     const text = [
       "function Store() { this.load = function () {}; }",

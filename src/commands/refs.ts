@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { importerClosure } from "../importers.js";
-import { isPlainLocal, isTextualCandidate, isUntyped, textualCount, textualNeedle, textualHint, textualLine, textualMatches, textualScan, textualScanHint, type TextualCount, type Unresolved } from "./impact.js";
+import { isPlainLocal, isTextualCandidate, onAliasLine, isUntyped, textualCount, textualNeedle, textualHint, textualLine, textualMatches, textualScan, textualScanHint, type TextualCount, type Unresolved } from "./impact.js";
 import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
@@ -401,7 +401,7 @@ function renderRefs(
   o: Common & { limit: number; kind: Kind },
 ): string {
   const split = semantic.referenceSplit(resolved.absFile, resolved.pos);
-  const rows = sortRows([...split.direct]);
+  const rows = sortRows(split.direct.filter((e) => !onAliasLine(o.decl, e)));
   const via = sortRows([...split.via]);
   const impls = sortRows([...split.implementations]);
   const { files, tests, fileList } = summary(opened, rows);

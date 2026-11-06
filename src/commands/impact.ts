@@ -330,7 +330,9 @@ export function textualMatches(
   changeSet: Map<string, Range[]>,
   localTo: Map<string, string> = new Map(),
 ): Unresolved[] {
-  const files = [...semantic.projectFiles];
+  // The whole Project, like `textualCount`: a subgraph program misses DI uses, which import nothing.
+  const byRel = new Map([...semantic.projectFiles, ...opened.index.files].map((f) => [opened.index.rel(f), f] as const));
+  const files = [...byRel.values()];
   const projectSet = new Set(files);
   walkExtra(opened.root, files);
   sourceFs().prefetch(files);
@@ -340,7 +342,7 @@ export function textualMatches(
     if (text === undefined || !names.some((n) => text.includes(n.text))) continue;
     const rel = opened.index.rel(abs);
     // A Declaration of another Symbol with the same name is provably not a use.
-    const declared = new Set(projectSet.has(abs) ? opened.index.declarations(abs).map((d) => d.nameLine) : []);
+    const declared = new Set(projectSet.has(abs) ? opened.index.declarations(abs).flatMap((d) => (d.aliasLine ? [d.nameLine, d.aliasLine] : [d.nameLine])) : []);
     const lines = new Set<number>();
     for (const { text: name, token } of names) {
       if (localTo.has(name) && localTo.get(name) !== abs) continue;
@@ -399,6 +401,11 @@ export function textualNeedle(subject: Declaration | string, kind?: string): Nee
     return name.includes("*") || name === "" ? undefined : { text: name, token: true };
   }
   return { text: symbol.split(".").pop()!, token: false };
+}
+
+/** A Reference on a member's aliasing line (`self.x = x`) is part of its Declaration, not a use. */
+export function onAliasLine(decl: Declaration | undefined, e: { file: string; line: number }): boolean {
+  return decl?.aliasLine !== undefined && e.file === decl.file && e.line === decl.aliasLine;
 }
 
 /** Whether `any`-typed property accesses of the name can be uses of the Symbol: same rule as `isTextualCandidate`. */
@@ -486,7 +493,7 @@ export function textualCount(opened: Opened, needle: Needle, changeSet: Map<stri
     const text = opened.index.text(abs);
     if (text === undefined || !text.includes(name)) continue;
     const rel = opened.index.rel(abs);
-    const declared = new Set(project.has(abs) ? opened.index.declarations(abs).filter((d) => d.name === name).map((d) => d.nameLine) : []);
+    const declared = new Set(project.has(abs) ? opened.index.declarations(abs).filter((d) => d.name === name).flatMap((d) => (d.aliasLine ? [d.nameLine, d.aliasLine] : [d.nameLine])) : []);
     const n = wordMatches(text, name, token).filter((m) => !declared.has(m.line) && !inRanges(changeSet.get(rel), m.line)).length;
     matches += n;
     if (n > 0) files++;
@@ -751,7 +758,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       entries = brokenReferences(semantic, row.change.before!);
     }
     for (const e of entries) known.add(`${e.file}:${e.line}`);
-    row.all = entries.filter((e) => !e.isDefinition);
+    row.all = entries.filter((e) => !e.isDefinition && !onAliasLine(row.live, e));
     row.outside = row.all.filter((e) => !inRanges(changeSet.get(e.file), e.line)).sort(byPosition);
   }
   for (const row of rows) {

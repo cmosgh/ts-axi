@@ -2,11 +2,13 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { decode } from "@toon-format/toon";
 import { describe, expect, it } from "vitest";
 import { buildImporterIndex, createResolver, extractImports, importerClosure } from "../src/importers.js";
 import { findRepoRoot, openProject, walkSourceFiles } from "../src/project.js";
 import { semanticFor } from "../src/scope.js";
 import { listFiles, walkFiles } from "../src/walk.js";
+import { runIn } from "./helpers.js";
 import { classifyTsconfig, detectWorkspace, pnpmPackageGlobs, readPathAliases } from "../src/workspace.js";
 
 /** A temp tree from `{ "rel/path": "text" }`; not a git repo unless `git` is set. */
@@ -21,6 +23,7 @@ function tree(files: Record<string, string>, options: { git?: boolean } = {}): s
 }
 
 const json = (value: unknown): string => JSON.stringify(value);
+const toon = (stdout: string): Record<string, unknown> => decode(stdout, { strict: true }) as Record<string, unknown>;
 
 describe("detectWorkspace", () => {
   it("nx: projects are the project.json dirs; pnpm and references stay as signals", () => {
@@ -228,4 +231,18 @@ describe("large implicit project", () => {
     const sf = semantic.program.getSourceFile(join(dir, "src/core.ts"))!;
     expect(semantic.findReferences(join(dir, "src/core.ts"), sf.text.indexOf("core")).filter((r) => !r.isDefinition).map((r) => r.file)).toEqual(["src/use.ts", "src/use.ts"]);
   });
+
+  it("refs --grep on a service member lists a DI use outside the importer subgraph", async () => {
+    const files: Record<string, string> = {
+      "app/store.js": "angular.module('m').service('store', store);\nfunction store() {\n  var self = this;\n  self.load = load;\n  function load() {}\n}\n",
+      "app/view.js": "angular.module('m').controller('View', function (store) {\n  store.load();\n});\n",
+    };
+    for (let i = 0; i < 3000; i++) files[`app/gen/f${i}.js`] = `var g${i} = ${i};\n`;
+    const dir = tree(files, { git: true });
+    const plain = toon((await runIn(dir, "refs", "store.load")).stdout);
+    expect(plain).toMatchObject({ refs_total: 0, textual: "1 matches in 1 files", scope: "implicit project - 1 of 3002 files (seeds 1; importers 0)" });
+    expect(plain["help"]).toEqual(expect.arrayContaining([expect.stringContaining("ts-axi refs app/store.js:5 --grep` for the 1 textual matches")]));
+    const grep = toon((await runIn(dir, "refs", "store.load", "--grep")).stdout);
+    expect(grep["unresolved"]).toEqual([{ file: "app/view.js", line: 2, context: "store.load();" }]);
+  }, 60_000);
 });

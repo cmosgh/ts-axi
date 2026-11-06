@@ -44,6 +44,10 @@ export interface Declaration {
   nameless?: true;
   /** Called by the framework or injected by name into its owner (a state's `resolve.x`, `onEnter`, `controller`): no project-wide textual count, no `any`-access blind spots. */
   injected?: true;
+  /** Offset of the member name in the `self.x = fn` assignment or `{ x: fn }` property that makes a nested function this member. */
+  aliasPos?: number;
+  /** Line of `aliasPos`. */
+  aliasLine?: number;
 }
 
 export const SIGNATURE_MAX = 160;
@@ -337,22 +341,51 @@ function functionByIdentifier(call: ts.CallExpression, arg: ts.Expression | unde
   if (!ref || !ts.isIdentifier(ref)) return undefined;
   let scope: ts.Node = call;
   while (!ts.isSourceFile(scope) && !(ts.isBlock(scope) && ts.isFunctionLike(scope.parent))) scope = scope.parent;
-  const statements = (scope as ts.SourceFile | ts.Block).statements;
+  return functionInStatements((scope as ts.SourceFile | ts.Block).statements, ref.text);
+}
+
+/** The function declaration or function-valued variable `name` among `statements` (any position: hoisting), with its `$inject`. */
+function functionInStatements(statements: readonly ts.Statement[], name: string): NamedFunction | undefined {
   let found: NamedFunction | undefined;
   let inject: ts.ArrayLiteralExpression | undefined;
   for (const st of statements) {
-    if (ts.isFunctionDeclaration(st) && st.name?.text === ref.text && st.body) found = { fn: st, name: st.name };
+    if (ts.isFunctionDeclaration(st) && st.name?.text === name && st.body) found = { fn: st, name: st.name };
     else if (ts.isVariableStatement(st)) {
       for (const d of st.declarationList.declarations) {
         const fn = asFunction(d.initializer);
-        if (fn && ts.isIdentifier(d.name) && d.name.text === ref.text) found = { fn, name: d.name };
+        if (fn && ts.isIdentifier(d.name) && d.name.text === name) found = { fn, name: d.name };
       }
     } else if (ts.isExpressionStatement(st) && ts.isBinaryExpression(st.expression) && ts.isPropertyAccessExpression(st.expression.left)) {
       const { left, right } = st.expression;
-      if (left.name.text === "$inject" && ts.isIdentifier(left.expression) && left.expression.text === ref.text && ts.isArrayLiteralExpression(right)) inject = right;
+      if (left.name.text === "$inject" && ts.isIdentifier(left.expression) && left.expression.text === name && ts.isArrayLiteralExpression(right)) inject = right;
     }
   }
   return found && (inject ? { ...found, inject } : found);
+}
+
+/** Names bound to `this` at the top level of a body (`var self = this`, `const vm = this`). */
+function thisAliases(statements: readonly ts.Statement[]): Set<string> {
+  const names = new Set<string>();
+  for (const st of statements) {
+    if (!ts.isVariableStatement(st)) continue;
+    for (const d of st.declarationList.declarations) {
+      if (ts.isIdentifier(d.name) && d.initializer && unwrap(d.initializer).kind === ts.SyntaxKind.ThisKeyword) names.add(d.name.text);
+    }
+  }
+  return names;
+}
+
+/** The object literal of a top-level `var <name> = {...}` among `statements`. */
+function objectVariable(statements: readonly ts.Statement[], name: string): ts.ObjectLiteralExpression | undefined {
+  let found: ts.ObjectLiteralExpression | undefined;
+  for (const st of statements) {
+    if (!ts.isVariableStatement(st)) continue;
+    for (const d of st.declarationList.declarations) {
+      const init = d.initializer && unwrap(d.initializer);
+      if (ts.isIdentifier(d.name) && d.name.text === name && init && ts.isObjectLiteralExpression(init)) found = init;
+    }
+  }
+  return found;
 }
 
 function isStringName(node: ts.Node | undefined): node is ts.StringLiteral | ts.NoSubstitutionTemplateLiteral {
@@ -390,6 +423,7 @@ interface Raw {
   injected?: true;
   /** Member found through a registration by identifier: it replaces the function's own members. */
   registered?: true;
+  aliasPos?: number;
 }
 
 /**
@@ -438,8 +472,21 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     raws.push({ ...raw, qualifiedName: raw.qualifiedName ?? (raw.parentName ? `${raw.parentName}.${raw.name}` : raw.name), hasBody: true });
   };
 
-  /** Method and function-valued properties of an object literal as `<holder>.<name>`. */
-  const objectMembers = (obj: ts.ObjectLiteralExpression, holder: string, exported: boolean): void => {
+  /**
+   * `<holder>.<name>` for a nested function named by identifier (`self.x = loadItem`, `{ x: loadItem }`): the
+   * function's own span, signature and name, so its line and the aliasing line both resolve to the member.
+   */
+  const aliasedMember = (scope: readonly ts.Statement[], ref: ts.Identifier, name: string, holder: string, exported: boolean, alias: ts.Node): void => {
+    const target = functionInStatements(scope, ref.text);
+    if (!target) return;
+    const decl = ts.isFunctionDeclaration(target.fn) ? target.fn : (target.name.parent as ts.VariableDeclaration);
+    const list = decl.parent;
+    const node = ts.isVariableDeclaration(decl) && ts.isVariableDeclarationList(list) && ts.isVariableStatement(list.parent) && list.declarations[0] === decl ? list.parent : decl;
+    nested({ start: node.getStart(sf), end: node.end, kind: "method", name, parentName: holder, exported, signature: fullSignatureOf(decl, sf), namePos: target.name.getStart(sf), aliasPos: alias.getStart(sf) });
+  };
+
+  /** Method and function-valued properties of an object literal as `<holder>.<name>`; with `scope`, also identifiers naming its functions. */
+  const objectMembers = (obj: ts.ObjectLiteralExpression, holder: string, exported: boolean, scope?: readonly ts.Statement[]): void => {
     for (const prop of obj.properties) {
       const name = nameText(prop.name, sf);
       if (!name || !prop.name) continue;
@@ -447,29 +494,50 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
         nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported, signature: fullSignatureOf(prop, sf), namePos: prop.name.getStart(sf) });
       } else if (ts.isPropertyAssignment(prop)) {
         const fn = asFunction(prop.initializer);
+        const value = unwrap(prop.initializer);
         if (fn) nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported, signature: headUntil(prop, fn, sf), namePos: prop.name.getStart(sf) });
+        else if (scope && ts.isIdentifier(value)) aliasedMember(scope, value, name, holder, exported, prop.name);
+      } else if (scope && ts.isShorthandPropertyAssignment(prop)) {
+        aliasedMember(scope, prop.name, name, holder, exported, prop.name);
       }
     }
   };
 
-  /** `this.x = function` statements at the top level of a constructor-like body. */
-  const thisMembers = (body: ts.ConciseBody | undefined, owner: string, exported: boolean): void => {
-    if (!body || !ts.isBlock(body)) return;
-    for (const statement of body.statements) {
+  /** `<holder>.x = function | <nested function>` at the top level of a body; `isHolder` matches `this`, its aliases or a returned object. */
+  const memberAssignments = (statements: readonly ts.Statement[], isHolder: (e: ts.Expression) => boolean, owner: string, exported: boolean): void => {
+    for (const statement of statements) {
       if (!ts.isExpressionStatement(statement) || !ts.isBinaryExpression(statement.expression)) continue;
       const { left, operatorToken, right } = statement.expression;
-      if (operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isPropertyAccessExpression(left) || left.expression.kind !== ts.SyntaxKind.ThisKeyword) continue;
+      if (operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isPropertyAccessExpression(left) || !isHolder(left.expression)) continue;
       const value = unwrap(right);
       if (ts.isObjectLiteralExpression(value)) objectMembers(value, `${owner}.${left.name.text}`, exported);
+      if (ts.isIdentifier(value)) aliasedMember(statements, value, left.name.text, owner, exported, left.name);
       const fn = asFunction(right);
       if (!fn) continue;
       nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: owner, exported, signature: headUntil(statement.expression, fn, sf), namePos: left.name.getStart(sf) });
     }
   };
 
-  /** Object literals a function returns at its top level (a factory's API, a deps object): their function-valued members. */
+  /** `this.x = ...` (also through `var self = this`) at the top level of a constructor-like body. */
+  const thisMembers = (body: ts.ConciseBody | undefined, owner: string, exported: boolean): void => {
+    if (!body || !ts.isBlock(body)) return;
+    const aliases = thisAliases(body.statements);
+    memberAssignments(body.statements, (e) => e.kind === ts.SyntaxKind.ThisKeyword || (ts.isIdentifier(e) && aliases.has(e.text)), owner, exported);
+  };
+
+  /** Object literals a function returns at its top level (a factory's API, a deps object), directly or as `var service = {...}; return service`. */
   const returnedMembers = (body: ts.ConciseBody | undefined, owner: string, exported: boolean): void => {
-    if (body) for (const obj of returnedObjects(body)) objectMembers(obj, owner, exported);
+    if (!body) return;
+    const scope = ts.isBlock(body) ? body.statements : undefined;
+    for (const obj of returnedObjects(body)) objectMembers(obj, owner, exported, scope);
+    for (const st of scope ?? []) {
+      const ret = ts.isReturnStatement(st) && st.expression ? unwrap(st.expression) : undefined;
+      if (!ret || !ts.isIdentifier(ret)) continue;
+      const obj = objectVariable(scope!, ret.text);
+      if (!obj) continue;
+      objectMembers(obj, owner, exported, scope);
+      memberAssignments(scope!, (e) => ts.isIdentifier(e) && e.text === ret.text, owner, exported);
+    }
   };
 
   const topLevelExported = (name: string): boolean => raws.find((r) => r.qualifiedName === name && r.parentName === undefined)?.exported ?? false;
@@ -854,7 +922,16 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
   const kept = registeredBodies.length === 0
     ? raws
     : raws.filter((r) => r.registered || !registeredBodies.some(([s, e]) => r.namePos >= s && r.namePos < e));
-  const ordered = kept.map((r, i) => ({ r, i })).sort((a, b) => a.r.start - b.r.start || a.i - b.i);
+  // One function named twice for the same holder (`this.x = x` and `return { x }`) is one member.
+  const seen = new Set<string>();
+  const unique = kept.filter((r) => {
+    if (r.aliasPos === undefined) return true;
+    const key = `${r.qualifiedName}@${r.namePos}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const ordered = unique.map((r, i) => ({ r, i })).sort((a, b) => a.r.start - b.r.start || a.i - b.i);
   return ordered.map(({ r }) => {
     const startLc = sf.getLineAndCharacterOfPosition(r.start);
     const full = r.signature;
@@ -875,6 +952,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       fullSignature: full,
       ...(r.nameless ? { nameless: true as const } : {}),
       ...(r.injected ? { injected: true as const } : {}),
+      ...(r.aliasPos !== undefined ? { aliasPos: r.aliasPos, aliasLine: sf.getLineAndCharacterOfPosition(r.aliasPos).line + 1 } : {}),
     };
   });
 }
