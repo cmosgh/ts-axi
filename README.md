@@ -50,6 +50,37 @@ Early, but already used in real reviews. What the numbers say so far:
 
 Known limits: `.astro` / `.vue` / `.svelte` files are not analysed (they appear under `skipped`, and `--grep` searches them textually); every semantic command starts cold (0.3 s on a small project, 2-5 s on the monorepo, dominated by the library `.d.ts` files that barrels pull in); import specifiers are extracted textually, so computed specifiers and bundler-only aliases are missed.
 
+## Token cost
+
+`test/integration/token-compare.test.ts` does six agent tasks twice: with ts-axi (plus one followed hint where that is the normal next step), and the way a careful agent does them without it - at most 3 `git grep -n` calls, then a ±40-line numbered read around each relevant match (overlaps merged), with `git diff` first for impact. Tokens are characters / 4. A recall gate fails when a grep hit in code (not a comment, a string or a doc file) is neither listed by ts-axi nor covered by its `textual` / `templates` count.
+
+<!-- token-compare:start -->
+| task | repo | ts-axi tokens | grep tokens | ratio | recall |
+| --- | --- | ---: | ---: | ---: | --- |
+| def of a class method | astro sample | 117 | 266 | 0.44 | 100% (1/1) |
+| callers of a function | astro sample | 227 | 1169 | 0.19 | 100% (8/8) |
+| refs of a class member | astro sample | 216 | 1133 | 0.19 | 100% (8/8) |
+| impact of a signature change | astro sample | 737 | 1304 | 0.56 | 100% (14/14) |
+| template uses of a directive | legacy-js | 409 | 289 | 1.42 | 100% (5/5) |
+| refs of an untyped CommonJS member | legacy-js | 387 | 401 | 0.96 | 100% (5/5) |
+
+- def of a class method is over 0.3 - the class file has 36 lines, so the grep side reads all of it once.
+- impact of a signature change is over 0.3 - the followed hint repeats the first output with the extra rows (refs on the changed function); impact alone is 0.33.
+- template uses of a directive is over 0.3 - the followed hint repeats the first output with the extra rows (--grep); the two matching files have 21 and 4 lines.
+- refs of an untyped CommonJS member is over 0.3 - the followed hint repeats the first output with the extra rows (--grep); the two matching files have 24 and 12 lines.
+<!-- token-compare:end -->
+
+The fixture files are 5 to 40 lines long, so a ±40-line read is the whole file: the cheapest case for grep, and where a followed hint repeating the first output weighs most. On a real Nx monorepo (143 projects, ~5.4k source files; `scripts/token-compare.ts`, run locally):
+
+| task | ts-axi tokens | grep tokens | ratio | recall |
+| --- | ---: | ---: | ---: | --- |
+| def of a service method | 496 | 1256 | 0.40 | 1/1 |
+| callers of a service method (17 call sites) | 873 | 54314 | 0.02 | 17/96 |
+| refs of a service method with a common name | 715 | 147944 | 0.01 | 18/77 (244 hits are other declarations of the name) |
+| impact of a two-commit fix (4 changed symbols) | 1395 | 23950 | 0.06 | 28/44 (5 in the diff) |
+
+Every hit those three rows miss is a member access through a deep-mock mapped type (`DeepMocked<Service>`) in a test file: the checker resolves it to the method, `findReferences` does not return it, and nothing reports it as a blind spot yet.
+
 ## Install
 
 Requires Node.js 20+.

@@ -1,6 +1,6 @@
 // Task-based token cost: each task done with ts-axi and with a careful grep-and-read workflow
 // (test/compare.ts). Gates: ts-axi lists every grep hit that is a real use, and costs <= MAX_RATIO.
-// Ratios are pinned in token-compare.json (+TOLERANCE); refresh with TOKEN_BUDGET_UPDATE=1.
+// Ratios are pinned in token-compare.json (+TOLERANCE); TOKEN_BUDGET_UPDATE=1 refreshes them and the README table.
 import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +12,7 @@ import { CLI, prepareFixture, prepareSample, type Sample } from "./helpers.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BASELINE = join(HERE, "token-compare.json");
+const README = join(HERE, "..", "..", "README.md");
 const REPORT = process.env["TOKEN_COMPARE_OUT"] ?? join(tmpdir(), "ts-axi-token-compare.md");
 const UPDATE = process.env["TOKEN_BUDGET_UPDATE"] === "1";
 const TOLERANCE = 0.1;
@@ -85,7 +86,13 @@ afterAll(() => {
     .join("\n");
   writeFileSync(REPORT, `${reportTable(rows)}\n${notes}\n\n${commands}\n`);
   process.stdout.write(`\n${reportTable(rows)}\n${notes}\n\n${commands}\n(written to ${REPORT})\n`);
-  if (UPDATE) writeFileSync(BASELINE, `${JSON.stringify(Object.fromEntries(rows.map((r) => [r.result.task.name, r.result.ratio])), null, 2)}\n`);
+  if (!UPDATE || rows.length !== CASES.length) return;
+  writeFileSync(BASELINE, `${JSON.stringify(Object.fromEntries(rows.map((r) => [r.result.task.name, r.result.ratio])), null, 2)}\n`);
+  // The README table is this report, never edited by hand.
+  const readme = readFileSync(README, "utf8");
+  const block = /(<!-- token-compare:start -->\n)[\s\S]*?(<!-- token-compare:end -->)/;
+  expect(readme).toMatch(block);
+  writeFileSync(README, readme.replace(block, (_, start: string, end: string) => `${start}${reportTable(rows)}\n${notes}\n${end}`));
 });
 
 async function run(c: Case): Promise<TaskResult> {
