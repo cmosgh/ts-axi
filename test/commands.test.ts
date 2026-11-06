@@ -129,6 +129,10 @@ describe("def", () => {
     expect(stdout).not.toContain("elapsed_ms");
   });
 
+  it("a constructor line names the constructor, not its parameter properties", async () => {
+    expect((await run("def", "src/models/user.ts:10")).stdout).toContain("line: 10\nkind: method\nexported: true\nsignature: \"constructor(");
+  });
+
   it("follows a reference position to its Declaration", async () => {
     const { stdout } = await run("def", "src/services/sync.ts:13:15");
     expect(stdout).toContain("file: src/models/user.ts\nline: 13");
@@ -655,6 +659,12 @@ describe("impact", () => {
       ]);
     });
 
+    it("a body edit of a function registered by identifier counts the registration's template usages", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/widgets.js", "$uibModal.open();", "$uibModal.open({});");
+      expect(changed(await impact(r))).toEqual([expect.objectContaining({ symbol: "fancyBox", change: "body", templates: 2 })]);
+    });
+
     it("a DI array or parameter change of a registration is a signature change", async () => {
       const r = repo(LEGACY_FIXTURE);
       r.edit("client/app.js", '["$scope", "priceService", function ($scope, priceService)', '["$scope", "taxService", function ($scope, priceService)');
@@ -799,6 +809,45 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(app[0]).toMatchObject({ exported: true, signature: "controller CartCtrl($scope, priceService)" });
   });
 
+  it("def finds a function-valued member of a returned deps object, by name, Holder.member and --fuzzy", async () => {
+    expect(await names("lib/services/access-guard.js")).toEqual([
+      "2 function makeItemDeps",
+      "6 method makeItemDeps.canReadItem",
+      "9 method makeItemDeps.describeDeps",
+      "16 function guard",
+      "20 function fetchItem",
+    ]);
+    const def = await legacy("def", "canReadItem");
+    expect(def.stdout).toContain("file: lib/services/access-guard.js\nline: 6\nkind: method");
+    expect((await legacy("def", "makeItemDeps.canReadItem")).stdout).toContain("line: 6\nkind: method");
+    expect((await legacy("def", "canreaditem", "--fuzzy")).stdout).toContain("file: lib/services/access-guard.js\nline: 6");
+  });
+
+  it("a line-only position names the declaration that starts the line, not its parameters; siblings stay ambiguous", async () => {
+    expect(toon((await legacy("refs", "lib/services/access-guard.js:6")).stdout)).toMatchObject({ symbol: "makeItemDeps.canReadItem", kind: "method" });
+    // Not indexed (an argument object): the function-valued property still outranks the callee and the arguments.
+    expect(toon((await legacy("refs", "lib/services/access-guard.test.js:4")).stdout)).toMatchObject({ symbol: "canReadItem", declared_at: "lib/services/access-guard.test.js:4" });
+    const siblings = toon((await legacy("refs", "lib/services/access-guard.test.js:10")).stdout);
+    expect(siblings).toMatchObject({ ambiguous: "2 identifiers on the line - add a column" });
+    expect(siblings["identifiers"]).toEqual([{ name: "firstId", line: 10, col: 7 }, { name: "lastId", line: 10, col: 20 }]);
+  });
+
+  it("a name with no Declaration: def and refs hint at its textual matches, refs --grep lists them", async () => {
+    const def = toon((await legacy("def", "retries")).stdout);
+    expect(def).toMatchObject({ matches: 0 });
+    expect(def["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs retries --grep` for 1 textual matches"]));
+    expect(toon((await legacy("refs", "retries")).stdout)["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs retries --grep` for 1 textual matches"]));
+    const grep = await legacy("refs", "retries", "--grep");
+    expect(grep.exitCode).toBe(0);
+    expect(toon(grep.stdout)).toMatchObject({
+      matches: 0,
+      note: "no declaration found - textual matches only",
+      unresolved: [{ file: "lib/services/access-guard.js", line: 12, context: "retries: 2," }],
+    });
+    expect(toon((await legacy("refs", "noSuchWordAnywhere", "--grep")).stdout)).toMatchObject({ matches: 0, unresolved: 0 });
+    expect(toon((await legacy("def", "noSuchWordAnywhere")).stdout)["help"]).not.toEqual(expect.arrayContaining([expect.stringContaining("--grep")]));
+  });
+
   it("def finds a controller by its registered name", async () => {
     const { stdout, exitCode } = await legacy("def", "CartCtrl");
     expect(exitCode).toBe(0);
@@ -858,6 +907,21 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(toon((await legacy("refs", "wapSelect.items")).stdout)).toMatchObject({ templates: "1 usages in 1 files" });
   });
 
+  it("a function registered by identifier gets the registration's templates, note and --grep rows", async () => {
+    for (const target of ["client/widgets.js:6", "client/widgets.js:2", "fancyBox"]) {
+      const data = toon((await legacy("refs", target)).stdout);
+      expect(data, target).toMatchObject({ symbol: "fancyBox", declared_at: "client/widgets.js:6", templates: "2 usages in 1 files" });
+      expect(data["note"], target).toContain("registered by a string");
+    }
+    const grep = toon((await legacy("refs", "fancyBox", "--grep")).stdout)["unresolved"] as Payload[];
+    expect(grep.map((u) => `${u["file"]}:${u["line"]}`)).toEqual(["client/templates/panel.html:2", "client/templates/panel.html:3"]);
+    // DI array form, function named differently from the registration.
+    for (const target of ["client/widgets.js:16", "panelController", "PanelCtrl"]) {
+      expect(toon((await legacy("refs", target)).stdout), target).toMatchObject({ symbol: "PanelCtrl", templates: "1 usages in 1 files" });
+    }
+    expect(toon((await legacy("refs", "fancyBox.boxTitle")).stdout)).toMatchObject({ templates: "1 usages in 1 files" });
+  });
+
   it("a binding on a multi-line tag counts past a quoted '>' in an earlier attribute", async () => {
     const rows = ((toon((await legacy("refs", "wapSelect.fallbackDisplayProperty", "--grep")).stdout)["unresolved"] as Payload[]) ?? [])
       .filter((u) => String(u["file"]).endsWith(".html"))
@@ -883,6 +947,17 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(local).toMatchObject({ symbol: "pad", textual: "2 matches in this file" });
     const grep = toon((await legacy("refs", "lib/format.js:2", "--grep")).stdout);
     expect(((grep["unresolved"] as Payload[] | number | undefined) ?? 0)).toEqual(0);
+  });
+
+  it("textual counts project-wide for what leaves the file: a returned member, an argument object's property, a CommonJS export", async () => {
+    const member = toon((await legacy("refs", "lib/services/access-guard.js:6")).stdout);
+    expect(member).toMatchObject({ refs_total: 2, textual: "4 matches in 2 files" });
+    expect(member["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs lib/services/access-guard.js:6 --grep` for the 2 textual matches the checker cannot resolve (untyped JavaScript)"]));
+    expect(toon((await legacy("refs", "lib/services/access-guard.test.js:4")).stdout)).toMatchObject({ refs_total: 0, textual: "4 matches in 2 files" });
+    expect(toon((await legacy("refs", "guard", "--in", "lib")).stdout)).toMatchObject({ textual: "4 matches in 2 files" });
+    // Not in module.exports: its own file only.
+    expect(toon((await legacy("refs", "fetchItem")).stdout)).toMatchObject({ textual: "1 matches in this file" });
+    expect(toon((await legacy("refs", "TAX")).stdout)).toMatchObject({ textual: "2 matches in this file" });
   });
 
   it("refs on a state resolve key prints no textual line - the key is injected by name, not imported", async () => {

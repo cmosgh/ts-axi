@@ -274,9 +274,25 @@ function identifiers(node: ts.Node, sf: ts.SourceFile, outIds: Array<ts.Identifi
   ts.forEachChild(node, (child) => identifiers(child, sf, outIds));
 }
 
+function isFunctionValue(expr: ts.Expression): boolean {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  return ts.isArrowFunction(e) || ts.isFunctionExpression(e);
+}
+
+/** Declares a name: a Declaration kind, a parameter, a binding element, or a function-valued property. */
 function isDeclarationName(id: ts.Node): boolean {
   const parent = id.parent as ts.Node & { name?: ts.Node };
-  return parent !== undefined && parent.name === id && (kindOf(parent) !== undefined || ts.isParameter(parent) || ts.isBindingElement(parent));
+  if (parent === undefined || parent.name !== id) return false;
+  if (ts.isPropertyAssignment(parent)) return isFunctionValue(parent.initializer);
+  return kindOf(parent) !== undefined || ts.isParameter(parent) || ts.isBindingElement(parent);
+}
+
+/** The node a declaration name owns, for nesting: `this.x = fn` → the whole assignment. */
+function declarationNode(id: ts.Node): ts.Node {
+  const parent = id.parent;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === id && ts.isBinaryExpression(parent.parent) && parent.parent.left === parent) return parent.parent;
+  return parent;
 }
 
 /** The identifier a `path:line[:col]` target points at (see PLAN.md Targets). */
@@ -310,26 +326,37 @@ export function resolvePosition(index: SyntacticIndex, cwd: string, target: Extr
     return hit ? pick(hit) : { kind: "none", abs, file, reason: `no identifier at ${file}:${target.line}:${target.col}` };
   }
   // A string-registered name has no identifier: its line stands for it.
-  const nameless = decls.find((d) => d.nameless && d.nameLine === target.line);
+  // The registration line too: `.directive('x', fancyBox)` has its name far from the function.
+  const nameless = decls.find((d) => d.nameless && d.nameLine === target.line) ?? decls.find((d) => d.nameless && d.line === target.line);
   if (nameless) return { kind: "decl", decl: nameless, abs };
   if (onLine.length === 0) return { kind: "none", abs, file, reason: `no identifier on ${file}:${target.line}` };
-  const constructorDecl = decls.find((d) => d.nameLine === target.line && d.name === "constructor");
-  const declared = onLine.find((id) => declFor(id)) ?? onLine.find(isDeclarationName);
-  if (declared) return pick(declared);
-  if (constructorDecl) return { kind: "decl", decl: constructorDecl, abs };
-  const distinct = new Map<string, ts.Identifier | ts.PrivateIdentifier>();
-  for (const id of onLine) if (!distinct.has(id.text)) distinct.set(id.text, id);
-  if (distinct.size === 1) return pick(onLine[0]!);
-  return {
-    kind: "ambiguous",
-    abs,
-    file,
-    candidates: [...distinct.values()].map((id) => ({
-      name: id.text,
-      line: target.line,
-      col: id.getStart(sf) - lineStart + 1,
-    })),
+  const ambiguous = (ids: ReadonlyArray<ts.Identifier | ts.PrivateIdentifier>): PositionResolution => {
+    const distinct = new Map<string, ts.Identifier | ts.PrivateIdentifier>();
+    for (const id of ids) if (!distinct.has(id.text)) distinct.set(id.text, id);
+    if (distinct.size === 1) return pick(ids[0]!);
+    return {
+      kind: "ambiguous",
+      abs,
+      file,
+      candidates: [...distinct.values()].map((id) => ({ name: id.text, line: target.line, col: id.getStart(sf) - lineStart + 1 })),
+    };
   };
+  const constructorDecl = decls.find((d) => d.nameLine === target.line && d.name === "constructor");
+  // The declaration that starts the line: names nested in another one's declaration (its parameters, its members) rank after it.
+  const declaring = onLine.filter((id) => declFor(id) !== undefined || isDeclarationName(id));
+  const owned = (inner: ts.Node, outer: ts.Node): boolean => {
+    const node = declarationNode(outer);
+    const at = inner.getStart(sf);
+    return node !== declarationNode(inner) && node.getStart(sf) <= at && at < node.end;
+  };
+  const outer = declaring.filter(
+    (id) =>
+      !(constructorDecl && ts.isParameter(id.parent) && ts.isConstructorDeclaration(id.parent.parent)) &&
+      !declaring.some((other) => other !== id && owned(id, other)),
+  );
+  if (outer.length > 0) return ambiguous(outer);
+  if (constructorDecl) return { kind: "decl", decl: constructorDecl, abs };
+  return ambiguous(onLine);
 }
 
 /** A Declaration for an arbitrary declaration name position (locals, parameters) not in the index. */

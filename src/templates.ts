@@ -2,7 +2,7 @@
 // elements/attributes, their bindings as attributes, controllers in `ng-controller`, filters
 // after `|`. One regex pass per template line, no HTML parsing.
 import { sourceFs } from "./fs.js";
-import type { Declaration } from "./symbols.js";
+import { registrationOf, type Declaration } from "./symbols.js";
 import { listFiles, toRel } from "./walk.js";
 
 export const TEMPLATE_EXTENSIONS = [".html", ".htm", ".ejs", ".hbs", ".njk", ".pug"] as const;
@@ -36,6 +36,12 @@ function elementOrAttribute(name: string): RegExp {
 
 /** A Declaration's template form; undefined when templates cannot name it. */
 export function templateTarget(decl: Declaration, fileDecls: readonly Declaration[]): TemplateTarget | undefined {
+  const registered = registrationOf(decl, fileDecls);
+  // A function registered by identifier uses the registered name; the row keeps the function's name.
+  if (registered) {
+    const target = templateTarget(registered, fileDecls);
+    return target && { ...target, symbol: decl.qualifiedName };
+  }
   const isComponent = (d: Declaration | undefined): boolean => d !== undefined && d.nameless === true && d.signature.startsWith("component ");
   if (decl.nameless && (decl.parentName === "directive" || isComponent(decl))) return { symbol: decl.qualifiedName, pattern: elementOrAttribute(decl.name) };
   if (decl.nameless && decl.parentName === "controller") {
@@ -43,7 +49,8 @@ export function templateTarget(decl: Declaration, fileDecls: readonly Declaratio
   }
   if (decl.nameless && decl.parentName === "filter") return { symbol: decl.qualifiedName, pattern: new RegExp(`(?<!\\|)\\|\\s*${escape(decl.name)}(?![\\w$])`, "g") };
   if (decl.kind === "property" && decl.parentName !== undefined) {
-    const owner = fileDecls.find((d) => d.qualifiedName === decl.parentName && d.parentName !== decl.parentName);
+    const owners = fileDecls.filter((d) => d.qualifiedName === decl.parentName && d.parentName !== decl.parentName);
+    const owner = owners.find((d) => d.nameless) ?? owners[0];
     if (owner && owner.nameless && (owner.parentName === "directive" || isComponent(owner))) {
       return {
         symbol: decl.qualifiedName,

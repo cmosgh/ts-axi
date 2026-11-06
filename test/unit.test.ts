@@ -34,8 +34,9 @@ import {
   wordMatches,
   type FileInput,
 } from "../src/impact.js";
-import { parseSource } from "../src/project.js";
-import { collectDeclarations } from "../src/symbols.js";
+import { parseSource, type SyntacticIndex } from "../src/project.js";
+import { isPlainLocal } from "../src/commands/impact.js";
+import { collectDeclarations, registrationOf } from "../src/symbols.js";
 import { matchRows, MATCH_ROWS, narrowHints } from "../src/commands/common.js";
 import { groupSymbols } from "../src/symbols.js";
 import { kebab, templateTarget, usagesIn } from "../src/templates.js";
@@ -608,6 +609,41 @@ describe("nested declarations", () => {
     expect(main.fullSignature).toBe("controller MainCtrl($scope)\n['$scope']");
   });
 
+  it("a registration by identifier links to the same-scope function, declared before or after (hoisted)", () => {
+    const text = [
+      "(function () {",
+      "  angular.module('m').directive('fancyBox', fancyBox).factory('store', ['$http', makeStore]).config(routes);",
+      "  fancyBox.$inject = ['$uibModal'];",
+      "  function fancyBox($uibModal) { return { scope: { size: '@' }, link: function () {} }; }",
+      "  function makeStore($http) { return { load: function () {} }; }",
+      "  function routes($stateProvider) { $stateProvider.state('home', { url: '/' }); }",
+      "  angular.module('m').filter('short', short);",
+      "  var short = function () { return function (s) { return s; }; };",
+      "})();",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual([
+      "function fancyBox exported nameless",
+      "function store exported nameless",
+      "function config exported nameless",
+      "function fancyBox",
+      "property fancyBox.size exported",
+      "function makeStore",
+      "method store.load exported",
+      "function routes",
+      "state states.home exported nameless",
+      "function short exported nameless",
+      "function short",
+    ]);
+    const all = collectDeclarations(parseSource("src/a.js", text), "src/a.js");
+    const reg = all.find((d) => d.nameless && d.name === "fancyBox")!;
+    const fn = all.find((d) => !d.nameless && d.name === "fancyBox")!;
+    expect(reg).toMatchObject({ line: 2, nameLine: 4, namePos: fn.namePos, signature: "directive fancyBox($uibModal)", fullSignature: "directive fancyBox($uibModal)\n['$uibModal']" });
+    expect(registrationOf(fn, all)).toBe(reg);
+    expect(registrationOf(all.find((d) => d.name === "makeStore")!, all)?.qualifiedName).toBe("store");
+    expect(all.find((d) => d.name === "store" && d.nameless)?.fullSignature).toBe("factory store($http)\n['$http']");
+  });
+
   it("object-literal holders, prototype and static assignments, this-members", () => {
     const text = [
       "function Store() { this.load = function () {}; }",
@@ -629,6 +665,36 @@ describe("nested declarations", () => {
       "method exports.d exported",
       "method methods.m exported",
       "method Template.home.helpers.h exported",
+    ]);
+  });
+
+  it("function-valued members of objects that leave a function, exports.x, this.x or export default; data members stay out", () => {
+    const text = [
+      "function createDeps(warn) { const n = 1; return { warn, check: async (a, b) => a, describe() {}, limit: 2 }; }",
+      "const makeApi = () => ({ load: function () {} });",
+      "exports.config = { onReady() {}, port: 80 };",
+      "exports.build = function () { return { run() {} }; };",
+      "function Panel() { this.handlers = { click: () => 1 }; }",
+      "function helper() { if (x) { return { nested() {} }; } const local = { inner() {} }; }",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual([
+      "function createDeps",
+      "method createDeps.check",
+      "method createDeps.describe",
+      "function makeApi",
+      "method makeApi.load",
+      "method config.onReady exported",
+      "method exports.build exported",
+      "method build.run exported",
+      "function Panel",
+      "method Panel.handlers.click",
+      "function helper",
+    ]);
+    expect(decls("export function useForm() { return { submit() {} }; }\nexport default { mounted() {}, name: 'x' };\n", "src/a.ts")).toEqual([
+      "function useForm exported",
+      "method useForm.submit exported",
+      "method default.mounted exported",
     ]);
   });
 
@@ -800,5 +866,32 @@ describe("template usages", () => {
   it("controllers in ng-controller, filters after a single pipe", () => {
     expect(lines('<div ng-controller="CartCtrl as c">\n<div data-ng-controller=\'CartCtrlX\'>', "CartCtrl")).toEqual([1]);
     expect(lines("{{ a | money }}\n{{ a || money }}\n{{ a |money:2 }}", "money")).toEqual([1, 3]);
+  });
+});
+
+describe("textual scope (isPlainLocal)", () => {
+  /** Whether the textual count of `name` stays in its declaring file. */
+  const local = (file: string, text: string, name: string) => {
+    const sf = parseSource(file, text);
+    const index = { abs: (rel: string) => rel, sourceFile: () => sf } as unknown as SyntacticIndex;
+    return isPlainLocal(index, collectDeclarations(sf, file).find((d) => d.name === name));
+  };
+
+  it("function-scoped bindings and private ES module bindings are local", () => {
+    expect(local("a.js", "(function () { function helper() {} })();", "helper")).toBe(true);
+    expect(local("a.ts", "import x from 'x';\nconst hidden = 1;\nexport const shown = hidden;", "hidden")).toBe(true);
+  });
+
+  it("a CommonJS top-level binding is local unless an exports assignment hands it out", () => {
+    const text = "const TAX = 1;\nfunction calc() { return TAX; }\nfunction inner() {}\nmodule.exports = { calc, run() { return TAX; } };\nexports.extra = inner;";
+    expect(local("a.js", text, "TAX")).toBe(true);
+    expect(local("a.js", text, "calc")).toBe(false);
+    expect(local("a.js", text, "inner")).toBe(false);
+    expect(local("a.js", "const fs = require('fs');\nfunction privateOne() {}", "privateOne")).toBe(true);
+  });
+
+  it("a script's top-level binding is a global; members are never local", () => {
+    expect(local("a.js", "function shared() {}", "shared")).toBe(false);
+    expect(local("a.js", "function make() { return { item: () => 1 }; }", "item")).toBe(false);
   });
 });

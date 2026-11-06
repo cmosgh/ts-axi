@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { bool, expectPositionals, flag, intFlag, parseArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { importerClosure } from "../importers.js";
-import { isPlainLocal, isTextualCandidate, isUntyped, textualCount, textualNeedle, textualHint, textualLine, textualMatches, type TextualCount, type Unresolved } from "./impact.js";
+import { isPlainLocal, isTextualCandidate, isUntyped, textualCount, textualNeedle, textualHint, textualLine, textualMatches, textualScan, textualScanHint, type TextualCount, type Unresolved } from "./impact.js";
 import { findOutsideProject, nearestTsconfig, type CallSite, type SemanticProject } from "../project.js";
 import { viaLine } from "../references.js";
 import { block, helpBlock, out } from "../render.js";
@@ -11,7 +11,7 @@ import { loadTemplates, templatesLine, templateTarget, templateUsages } from "..
 import { byDepthThenPath } from "../walk.js";
 import { detectWorkspace, isMultiProject } from "../workspace.js";
 import { isTestFile } from "../settings.js";
-import { isFunctionLike, kindFromScriptElement, parseTarget, type Declaration, type Kind } from "../symbols.js";
+import { isFunctionLike, kindFromScriptElement, parseTarget, registrationOf, type Declaration, type Kind } from "../symbols.js";
 import {
   contextOf,
   declarationAt,
@@ -46,8 +46,8 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   refs_total: 0 under -P in a workspace lists found_outside_project[n]{file,line} = importers outside that Project
   scope = in a monorepo without -P the program is the declaring file + its importers (scope_partial: true when the importer scan was capped)
   tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references
-  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects; a state counts its full dotted name as a whole token, templates included; not for a state's resolve keys and hooks - injected by name, not imported); 'n matches in this file' for a non-exported local; above refs_total = uses the checker cannot resolve - see refs --grep
-  templates: n usages in m files = template uses (.html .htm .ejs .hbs .njk .pug) of a directive or component (<wap-select / wap-select / data-wap-select), its bindings (fallback-display-property= on that tag), a controller (ng-controller) or a filter (| money); refs --grep lists them in unresolved`;
+  textual: n matches in m files = whole-word count of the name in Project files (JavaScript declarations and implicit projects; a state counts its full dotted name as a whole token, templates included; not for a state's resolve keys and hooks - injected by name, not imported); 'n matches in this file' only for a real local (a parameter, a binding inside a function or IIFE, a non-exported top-level binding of an ES module or of a CommonJS file whose module.exports never hands it out) - members, object properties and script globals count Project-wide; above refs_total = uses the checker cannot resolve - see refs --grep
+  templates: n usages in m files = template uses (.html .htm .ejs .hbs .njk .pug) of a directive or component (<wap-select / wap-select / data-wap-select), its bindings (fallback-display-property= on that tag), a controller (ng-controller) or a filter (| money) - also for a function registered by identifier (.directive('fancyBox', fancyBox)), under the registered name; refs --grep lists them in unresolved`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
 flags[13]:
@@ -58,7 +58,9 @@ flags[13]:
 output:
   symbol, kind, declared_at, refs_total, files, tests, refs[n]{file,line,context} (Declarations excluded), elapsed_ms
   ${VIA_DOC}
-  note = the name is registered by a string ('Name' in .controller('Name', fn)) - its uses are textual; add --grep
+  note = the name is registered by a string ('Name' in .controller('Name', fn), or fn a same-file function named by identifier) - its uses are textual; add --grep
+  matches: 0 = no Declaration of the name; help counts its whole-word matches in Project files, and --grep lists them in unresolved with note 'no declaration found - textual matches only'
+  path:line = the declaration that starts the line (a function before its parameters, a property before its value's parameters; siblings like 'const a = 1, b = 2' list identifiers - add :col)
   an ambiguous name lists matches[n] (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms; nothing is analysed
 examples[4]:
   ts-axi refs User.save
@@ -153,10 +155,28 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
           ]),
         );
       }
+      // No Declaration, but the name may still be written: an untyped property set up elsewhere.
+      const text = f.fuzzy ? [] : textualScan(opened, target.member ?? target.name);
+      if (show.grep) {
+        return out(
+          block({
+            ...warning,
+            matches: 0,
+            note: "no declaration found - textual matches only",
+            unresolved: text.length === 0 ? 0 : text.slice(0, limit),
+            ...(text.length > limit ? { unresolved_total: text.length } : {}),
+          }),
+          helpBlock([
+            ...(text.length > limit ? [`Showing ${limit} of ${text.length}; run \`ts-axi refs ${label} --grep --limit ${Math.min(MAX_LIMIT, text.length)}\` for more`] : []),
+            `Run \`ts-axi def ${label} --fuzzy\` for substring matches`,
+          ]),
+        );
+      }
       const suggested = suggestions(opened, target);
       return out(
         block({ ...warning, matches: 0, ...(suggested.length > 0 ? { did_you_mean: suggested } : {}) }),
         helpBlock([
+          ...(text.length > 0 ? [textualScanHint(label, text.length)] : []),
           ...suggested.slice(0, 2).map((s) => `Run \`ts-axi ${name} ${s}\``),
           ...(f.fuzzy ? [] : [`Run \`ts-axi def ${label} --fuzzy\` for substring matches`]),
         ]),
@@ -193,16 +213,18 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   }
   const { semantic, scope } = built;
   const def = semantic.definitionAt(resolved.absFile, resolved.pos);
-  const decl =
+  const found =
     resolved.decl ??
     (def && def.line > 0 ? declarationAt(opened.index, def.absFile, def.pos, kindFromScriptElement(def.kind)) : undefined);
+  // A function registered by identifier is its registration: templates, note and textual use the registered name.
+  const decl = (found && registrationOf(found, opened.index.declarations(opened.index.abs(found.file)))) ?? found;
   const kind: Kind = decl?.kind ?? kindFromScriptElement(def?.kind ?? semantic.quickInfo(resolved.absFile, resolved.pos)?.kind ?? "");
   const symbol = decl?.qualifiedName ?? def?.name ?? label;
   const declaredAt = decl ? `${decl.file}:${decl.nameLine}` : def && def.line > 0 ? `${def.file}:${def.line}` : "(outside the Project)";
   const header = { ...warning, ...projectFields(opened), symbol, kind, declared_at: declaredAt };
   const explicit = Boolean(project || opened.settings.project);
   const declaredFile = decl?.file ?? (def && def.line > 0 ? def.file : undefined);
-  const localFile = isPlainLocal(decl) ? opened.index.abs(decl.file) : undefined;
+  const localFile = isPlainLocal(opened.index, decl) ? opened.index.abs(decl.file) : undefined;
   const needle = textualNeedle(decl ?? symbol, kind);
   const textual = declaredFile !== undefined && needle && isUntyped(opened, decl, declaredFile) ? textualCount(opened, needle, new Map(), localFile) : undefined;
   const tplTarget = decl ? templateTarget(decl, opened.index.declarations(opened.index.abs(decl.file))) : undefined;
@@ -349,7 +371,7 @@ function unresolvedOf(opened: Opened, semantic: SemanticProject, o: Common, know
     new Set(known.map((r) => `${r.file}:${r.line}`)),
     new Set(o.decl ? [`${o.decl.file}:${o.decl.line}`, `${o.decl.file}:${o.decl.nameLine}`] : []),
     new Map(),
-    isPlainLocal(o.decl) ? new Map([[o.decl.name, opened.index.abs(o.decl.file)]]) : new Map(),
+    isPlainLocal(opened.index, o.decl) ? new Map([[o.decl.name, opened.index.abs(o.decl.file)]]) : new Map(),
   );
 }
 
