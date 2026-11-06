@@ -1,4 +1,5 @@
 import { runAxiCli } from "axi-sdk-js";
+import { anchorCommand, ANCHOR_HELP } from "./commands/anchor.js";
 import { configCommand, CONFIG_HELP } from "./commands/config.js";
 import { defCommand, DEF_HELP } from "./commands/def.js";
 import { homeCommand } from "./commands/home.js";
@@ -17,8 +18,8 @@ export const DESCRIPTION =
   "TypeScript/JavaScript symbol CLI for agents - definitions, references, callers, file outlines and change impact (what a diff affects) from the TypeScript compiler. Prefer it over grep for 'who uses this'.";
 
 export const TOP_HELP = `usage: ts-axi [command] [args] [flags]
-commands[8]:
-  (none)=project overview, def, refs, callers, outline, impact, config, setup (opt-in session hooks)
+commands[9]:
+  (none)=project overview, def, refs, callers, outline, impact, anchor (is a review comment's file:line in the diff), config, setup (opt-in session hooks)
 targets:
   name (save), member (User.save) or position (src/a.ts:42 or src/a.ts:42:7)
 flags[5]:
@@ -31,6 +32,7 @@ examples:
   ts-axi refs User.save --ref origin/main
   ts-axi outline src/models/user.ts
   ts-axi impact main...HEAD
+  bb-axi pr diff 42 --raw | ts-axi anchor - src/a.ts:12
   ts-axi refs --help
 `;
 
@@ -40,6 +42,7 @@ const COMMAND_HELP: Record<string, string> = {
   callers: CALLERS_HELP,
   outline: OUTLINE_HELP,
   impact: IMPACT_HELP,
+  anchor: ANCHOR_HELP,
   config: CONFIG_HELP,
   setup: SETUP_HELP,
 };
@@ -71,7 +74,7 @@ export interface MainOptions {
   stdout?: { write: (chunk: string) => unknown };
   /** Working directory for the run (default `process.cwd()`); tests pass a fixture path. */
   cwd?: string;
-  /** Stdin for `impact -` (tests); default `process.stdin`. */
+  /** Stdin for `impact -` and `anchor -` (tests); default `process.stdin`. */
   stdin?: string;
 }
 
@@ -99,13 +102,14 @@ export async function main(options: MainOptions = {}): Promise<void> {
         callers: command("callers", callersCommand, ctx),
         outline: command("outline", outlineCommand, ctx),
         impact: command("impact", impactCommand, ctx),
+        anchor: command("anchor", anchorCommand, ctx),
         config: command("config", configCommand, ctx),
         setup: command("setup", (args) => setupCommand(args), ctx),
       },
       getCommandHelp: (name) => COMMAND_HELP[name],
       renderUnknownCommand: (name) =>
         `${renderErrorOutput(`unknown command '${name}'`, "VALIDATION_ERROR", [
-          "commands: def, refs, callers, outline, impact, config, setup (no command = project overview)",
+          "commands: def, refs, callers, outline, impact, anchor, config, setup (no command = project overview)",
           "Run `ts-axi --help` for examples",
         ])}\n`,
       formatError,

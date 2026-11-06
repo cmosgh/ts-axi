@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { judge, lineCount, looksLikeAnchor, parseAnchor } from "../src/anchor.js";
 import { baseRevOfRange, changedRanges, parseUnifiedDiff } from "../src/diff.js";
 import {
   currentBranch,
@@ -384,6 +385,84 @@ describe("changedRanges", () => {
       ["--- a/f.ts", "+++ b/f.ts", "@@ -0,0 +9,2 @@", "+a", "+b", "@@ -0,0 +2 @@", "+c", "@@ -0,0 +4 @@", "+d"].join("\n"),
     );
     expect(changedRanges(file!).after).toEqual([[2, 2], [4, 4], [9, 10]]);
+  });
+});
+
+describe("anchor judgement", () => {
+  // Two hunks at -U3: new lines 2-8 (added 5) and 20-26 (removed old 22, added new 23).
+  const twoHunks = parseUnifiedDiff(
+    [
+      "--- a/src/q.ts",
+      "+++ b/src/q.ts",
+      "@@ -2,6 +2,7 @@",
+      " l2", " l3", " l4", "+new5", " l5", " l6", " l7",
+      "@@ -19,7 +20,7 @@",
+      " l19", " l20", " l21", "-old22", "+new23", " l23", " l24", " l25",
+    ].join("\n"),
+  )[0]!;
+  const at = (raw: string) => parseAnchor(raw);
+
+  it("parses file:line and ranges, rejecting columns and reversed ranges", () => {
+    expect(at("src/a.ts:12")).toEqual({ raw: "src/a.ts:12", path: "src/a.ts", start: 12, end: 12 });
+    expect(at("./src/a.ts:3-5")).toMatchObject({ path: "src/a.ts", start: 3, end: 5 });
+    expect(() => at("src/a.ts:12:4")).toThrow(/has a column/);
+    expect(() => at("src/a.ts:9-3")).toThrow(/ends before it starts/);
+    expect(() => at("src/a.ts:0")).toThrow(/start at 1/);
+    expect(looksLikeAnchor("main...HEAD")).toBe(false);
+    expect(looksLikeAnchor("-")).toBe(false);
+    expect(looksLikeAnchor("src/a.ts:12-14")).toBe(true);
+  });
+
+  it("accepts added and context lines and gives the other side of a context line", () => {
+    expect(judge(at("src/q.ts:5"), twoHunks, "new", 40)).toMatchObject({ ok: true, reason: "-", inDiff: true, inFile: true });
+    expect(judge(at("src/q.ts:6"), twoHunks, "new", 40)).toMatchObject({ ok: true, otherLine: 5 });
+    expect(judge(at("src/q.ts:22-24"), twoHunks, "new", 40)).toMatchObject({ ok: true });
+  });
+
+  it("names the closer hunk for a line between two hunks", () => {
+    expect(judge(at("src/q.ts:10"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "not in diff - nearest src/q.ts:2-8", nearest: "src/q.ts:2-8" });
+    expect(judge(at("src/q.ts:17"), twoHunks, "new", 40)).toMatchObject({ reason: "not in diff - nearest src/q.ts:20-26" });
+  });
+
+  it("rejects a range that leaves its hunk, a line past the end and a removed line on the new side", () => {
+    expect(judge(at("src/q.ts:7-10"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "crosses hunk boundary - hunk src/q.ts:2-8", inDiff: false });
+    expect(judge(at("src/q.ts:45"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "past end of file (40 lines)", inFile: false });
+    const removed = parseUnifiedDiff(["--- a/r.ts", "+++ b/r.ts", "@@ -30,2 +29,0 @@", "-x", "-y"].join("\n"))[0]!;
+    expect(judge(at("r.ts:30"), removed, "new", 50)).toMatchObject({ ok: false, reason: "removed line - use --side old" });
+    expect(judge(at("r.ts:30-31"), removed, "old", 52)).toMatchObject({ ok: true });
+  });
+
+  it("checks the old side: removed and context lines pass, an added line points to --side new", () => {
+    expect(judge(at("src/q.ts:22"), twoHunks, "old", 39)).toMatchObject({ ok: true });
+    expect(judge(at("src/q.ts:5"), twoHunks, "old", 39)).toMatchObject({ ok: true, otherLine: 6 });
+    const added = parseUnifiedDiff(["--- a/s.ts", "+++ b/s.ts", "@@ -5,0 +6,2 @@", "+a", "+b"].join("\n"))[0]!;
+    expect(judge(at("s.ts:6"), added, "old", 10)).toMatchObject({ ok: false, reason: "added line - use --side new" });
+    expect(judge(at("s.ts:6-7"), added, "new", 12)).toMatchObject({ ok: true });
+  });
+
+  it("handles added, deleted, binary and absent files", () => {
+    const files = parseUnifiedDiff(
+      [
+        "diff --git a/n.ts b/n.ts", "new file mode 100644", "--- /dev/null", "+++ b/n.ts", "@@ -0,0 +1,2 @@", "+a", "+b",
+        "diff --git a/d.ts b/d.ts", "deleted file mode 100644", "--- a/d.ts", "+++ /dev/null", "@@ -1,2 +0,0 @@", "-a", "-b",
+        "diff --git a/logo.png b/logo.png", "Binary files a/logo.png and b/logo.png differ",
+      ].join("\n"),
+      { binary: true },
+    );
+    const [added, deleted, binary] = files;
+    expect(judge(at("n.ts:2"), added, "new", 2)).toMatchObject({ ok: true });
+    expect(judge(at("n.ts:1"), added, "old", 0)).toMatchObject({ ok: false, reason: "file added - use --side new" });
+    expect(judge(at("d.ts:1"), deleted, "new", 0)).toMatchObject({ ok: false, reason: "removed line - use --side old" });
+    expect(judge(at("d.ts:5"), deleted, "new", 0)).toMatchObject({ ok: false, reason: "file deleted - use --side old" });
+    expect(judge(at("d.ts:2"), deleted, "old", 2)).toMatchObject({ ok: true });
+    expect(judge(at("logo.png:1"), binary, "new", undefined)).toMatchObject({ ok: false, reason: "binary" });
+    expect(judge(at("x.ts:1"), undefined, "new", undefined)).toMatchObject({ ok: false, reason: "file not in diff" });
+  });
+
+  it("counts lines on \\n only", () => {
+    expect(lineCount("")).toBe(0);
+    expect(lineCount("a\nb")).toBe(2);
+    expect(lineCount("a\r\nb c d\n")).toBe(2);
   });
 });
 

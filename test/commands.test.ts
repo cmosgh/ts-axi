@@ -337,7 +337,7 @@ describe("cli", () => {
     expect((await run("refs", "User.save", "-P", "nope.json")).exitCode).toBe(2);
   });
 
-  it.each(["def", "refs", "callers", "outline", "impact", "config"])("%s --help and -h print usage", async (command) => {
+  it.each(["def", "refs", "callers", "outline", "impact", "anchor", "config"])("%s --help and -h print usage", async (command) => {
     for (const flag of ["--help", "-h"]) {
       const { stdout, exitCode } = await run(command, flag);
       expect(exitCode).toBe(0);
@@ -346,7 +346,7 @@ describe("cli", () => {
   });
 
   it("top-level --help lists the commands", async () => {
-    expect((await run("--help")).stdout).toContain("def, refs, callers, outline, impact, config");
+    expect((await run("--help")).stdout).toContain("def, refs, callers, outline, impact, anchor");
   });
 
 });
@@ -1113,5 +1113,192 @@ describe("workspace (Nx + pnpm fixture)", () => {
     expect(files(data)).toContain("services/reports/src/summary.ts");
     const callers = toon((await r.run("callers", "formatMoney")).stdout);
     expect(files(callers)).not.toContain("services/reports/src/summary.ts");
+  });
+});
+
+describe("anchor", () => {
+  const gitIn = (dir: string, ...args: string[]): string =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", "-c", "core.quotepath=true", ...args], { cwd: dir, encoding: "utf8" });
+  const numbered = (n: number): string => Array.from({ length: n }, (_, i) => `    const v${i + 1} = ${i + 1};`).join("\n");
+
+  // One class; edits at line 5 and line 31 give two -U3 hunks (new 2-8 and 28-33).
+  const LEDGER = [
+    "export class Ledger {",
+    "  private rows: number[] = [];",
+    "",
+    "  add(n: number): void {",
+    "    this.rows.push(n);",
+    "  }",
+    "",
+    "  sum(): number {",
+    numbered(18),
+    "    return this.rows.reduce((a, b) => a + b, 0);",
+    "  }",
+    "",
+    "  clear(): void {",
+    "    this.rows = [];",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+
+  /** main = base commit; feature = two edits, a rename, an added, a deleted, a binary and a non-ASCII file. */
+  function repo() {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "ts-axi-anchor-")));
+    const write = (rel: string, text: string | Buffer) => {
+      mkdirSync(join(dir, rel, ".."), { recursive: true });
+      writeFileSync(join(dir, rel), text);
+    };
+    gitIn(dir, "init", "-q");
+    gitIn(dir, "symbolic-ref", "HEAD", "refs/heads/main");
+    write("src/ledger.ts", LEDGER);
+    write("src/old-name.ts", `export function moved(): number {\n  return 1;\n}\n${numbered(10)}\n`);
+    write("src/gone.ts", "export const gone = 1;\nexport const alsoGone = 2;\n");
+    write("assets/logo.bin", Buffer.from([0, 1, 2, 3, 0, 255]));
+    write("src/naïve.ts", "export const a = 1;\n");
+    gitIn(dir, "add", "-A");
+    gitIn(dir, "commit", "-q", "-m", "base");
+    gitIn(dir, "checkout", "-q", "-b", "feature");
+    write("src/ledger.ts", LEDGER.replace("    this.rows.push(n);", "    if (n !== 0) this.rows.push(n);").replace("    this.rows = [];", "    this.rows.length = 0;"));
+    gitIn(dir, "mv", "src/old-name.ts", "src/new-name.ts");
+    write("src/new-name.ts", `export function moved(): number {\n  return 2;\n}\n${numbered(10)}\n`);
+    write("src/fresh.ts", "export function fresh(): string {\n  return 'x';\n}\n");
+    rmSync(join(dir, "src/gone.ts"));
+    write("assets/logo.bin", Buffer.from([0, 9, 9, 9, 0, 255]));
+    write("src/naïve.ts", "export const a = 2;\n");
+    gitIn(dir, "add", "-A");
+    gitIn(dir, "commit", "-q", "-m", "feature");
+    return { dir, run: runner(dir), git: (...args: string[]) => gitIn(dir, ...args), write };
+  }
+  type Row = { anchor: string; ok: boolean; reason: string; symbol: string; [k: string]: unknown };
+  const rowsOf = (stdout: string): Row[] => toon(stdout)["anchors"] as Row[];
+
+  let r: ReturnType<typeof repo>;
+  beforeAll(() => {
+    r = repo();
+  });
+
+  it("checks anchors against a range at -U3: added, context, off-diff and absent", async () => {
+    const { stdout, exitCode } = await r.run("anchor", "main...feature", "src/ledger.ts:5", "src/ledger.ts:3", "src/ledger.ts:15", "src/ledger.ts:30-32", "src/other.ts:1");
+    expect(exitCode).toBe(3);
+    const data = toon(stdout);
+    expect(data).toMatchObject({ head: "feature", context: 3, side: "new", invalid: 2 });
+    expect(data["base"]).toMatch(/^[0-9a-f]{40}$/);
+    expect(rowsOf(stdout)).toEqual([
+      { anchor: "src/ledger.ts:5", ok: true, reason: "-", symbol: "Ledger.add#method" },
+      { anchor: "src/ledger.ts:3", ok: true, reason: "-", symbol: "Ledger#class" },
+      { anchor: "src/ledger.ts:15", ok: false, reason: "not in diff - nearest src/ledger.ts:2-8", symbol: "Ledger.sum#method" },
+      { anchor: "src/ledger.ts:30-32", ok: true, reason: "-", symbol: "Ledger.clear#method" },
+      { anchor: "src/other.ts:1", ok: false, reason: "file not in diff", symbol: "-" },
+    ]);
+    expect(data["help"]).toEqual(expect.arrayContaining([
+      "Move src/ledger.ts:15 into src/ledger.ts:2-8 or post it as a general comment",
+      expect.stringContaining("exit 3 (ANCHOR_INVALID) - 2 of 5"),
+      "Run `ts-axi anchor main...feature src/ledger.ts:15 src/other.ts:1 --fields all` for in_diff, in_file, nearest, change and other_line",
+    ]));
+  });
+
+  it("--fields all adds in_diff, in_file, nearest, change and other_line; exit 0 when all pass", async () => {
+    const { stdout, exitCode } = await r.run("anchor", "main...feature", "src/ledger.ts:5", "src/ledger.ts:6", "--fields", "all");
+    expect(exitCode).toBe(0);
+    expect(rowsOf(stdout)).toEqual([
+      { anchor: "src/ledger.ts:5", ok: true, reason: "-", symbol: "Ledger.add#method", in_diff: true, in_file: true, nearest: "-", change: "body", other_line: "-" },
+      { anchor: "src/ledger.ts:6", ok: true, reason: "-", symbol: "Ledger.add#method", in_diff: true, in_file: true, nearest: "-", change: "body", other_line: 6 },
+    ]);
+    expect(toon(stdout)["invalid"]).toBe(0);
+  });
+
+  it("--context 0 shrinks the hunks to the changed lines", async () => {
+    const rows = rowsOf((await r.run("anchor", "main...feature", "src/ledger.ts:5", "src/ledger.ts:4", "--context", "0")).stdout);
+    expect(rows.map((x) => [x.ok, x.reason])).toEqual([[true, "-"], [false, "not in diff - nearest src/ledger.ts:5"]]);
+  });
+
+  it("renamed, added, deleted, binary and non-ASCII (quoted) files", async () => {
+    const { stdout } = await r.run(
+      "anchor", "main...feature",
+      "src/new-name.ts:2", "src/old-name.ts:2", "src/fresh.ts:1-3", "src/gone.ts:1", "assets/logo.bin:1", "src/naïve.ts:1",
+    );
+    expect(rowsOf(stdout).map((x) => [x.anchor, x.ok, x.reason, x.symbol])).toEqual([
+      ["src/new-name.ts:2", true, "-", "moved#function"],
+      ["src/old-name.ts:2", true, "-", "moved#function"],
+      ["src/fresh.ts:1-3", true, "-", "fresh#function"],
+      ["src/gone.ts:1", false, "removed line - use --side old", "-"],
+      ["assets/logo.bin:1", false, "binary", "-"],
+      ["src/naïve.ts:1", true, "-", "a#variable"],
+    ]);
+  });
+
+  it("--side old checks the before file under the old path", async () => {
+    const { stdout, exitCode } = await r.run("anchor", "main...feature", "src/ledger.ts:5", "src/old-name.ts:2", "src/gone.ts:1-2", "src/fresh.ts:1", "--side", "old", "--fields", "change");
+    expect(exitCode).toBe(3);
+    expect(rowsOf(stdout).map((x) => [x.anchor, x.ok, x.reason, x.symbol, x["change"]])).toEqual([
+      ["src/ledger.ts:5", true, "-", "Ledger.add#method", "body"],
+      ["src/old-name.ts:2", true, "-", "moved#function", "body"],
+      ["src/gone.ts:1-2", true, "-", "file_level", "-"],
+      ["src/fresh.ts:1", false, "file added - use --side new", "-", "-"],
+    ]);
+  });
+
+  it("reads a diff from stdin as given, with --json and exit 3", async () => {
+    const diff = r.git("diff", "-U3", "main...feature");
+    let stdout = "";
+    process.exitCode = 0;
+    await main({ argv: ["anchor", "-", "src/ledger.ts:5", "src/ledger.ts:14", "--json"], cwd: r.dir, stdin: diff, stdout: { write: (c: string) => (stdout += c) } });
+    expect(process.exitCode).toBe(3);
+    process.exitCode = 0;
+    const data = JSON.parse(stdout) as Payload;
+    expect(data).toMatchObject({ base: "stdin diff", side: "new", invalid: 1 });
+    expect(data).not.toHaveProperty("context");
+    expect(data["anchors"]).toEqual([
+      { anchor: "src/ledger.ts:5", ok: true, reason: "-", symbol: "Ledger.add#method" },
+      { anchor: "src/ledger.ts:14", ok: false, reason: "not in diff - nearest src/ledger.ts:2-8", symbol: "Ledger.sum#method" },
+    ]);
+  });
+
+  it("warns when a stdin diff does not match the checkout", async () => {
+    const diff = r.git("diff", "-U3", "main...feature", "--", "src/ledger.ts");
+    r.git("checkout", "-q", "main");
+    try {
+      let stdout = "";
+      await main({ argv: ["anchor", "-", "src/ledger.ts:5"], cwd: r.dir, stdin: diff, stdout: { write: (c: string) => (stdout += c) } });
+      process.exitCode = 0;
+      expect(toon(stdout)["warning"]).toMatch(/^1 files in the stdin diff do not match the working tree/);
+      expect(rowsOf(stdout)).toEqual([{ anchor: "src/ledger.ts:5", ok: true, reason: "-", symbol: "-" }]);
+    } finally {
+      r.git("checkout", "-q", "feature");
+    }
+  });
+
+  it("--staged and the working tree (untracked files count as added)", async () => {
+    const w = repo();
+    w.write("src/ledger.ts", LEDGER.replace("  sum(): number {", "  sum(): number { // staged"));
+    w.git("add", "src/ledger.ts");
+    w.write("src/scratch.ts", "export const s = 1;\n");
+    const staged = await w.run("anchor", "--staged", "src/ledger.ts:8", "src/scratch.ts:1");
+    expect(toon(staged.stdout)).toMatchObject({ base: "HEAD", head: "index" });
+    expect(rowsOf(staged.stdout).map((x) => x.reason)).toEqual(["-", "file not in diff"]);
+    const tree = await w.run("anchor", "src/ledger.ts:8", "src/scratch.ts:1");
+    expect(tree.exitCode).toBe(0);
+    expect(toon(tree.stdout)).toMatchObject({ head: "working tree" });
+    expect(rowsOf(tree.stdout).map((x) => x.symbol)).toEqual(["Ledger.sum#method", "s#variable"]);
+  });
+
+  it("usage errors: no anchors, source after anchors, column, --context with -, --staged with a range", async () => {
+    const cases: Array<[string[], RegExp]> = [
+      [["anchor", "main...feature"], /no anchors given/],
+      [["anchor", "src/ledger.ts:5", "main...feature"], /'main...feature' is not an anchor/],
+      [["anchor", "main...feature", "src/ledger.ts:5:3"], /has a column/],
+      [["anchor", "-", "src/ledger.ts:5", "--context", "1"], /--context applies to git diffs/],
+      [["anchor", "--staged", "main...feature", "src/ledger.ts:5"], /--staged cannot be combined/],
+      [["anchor", "main...feature", "src/ledger.ts:5", "--side", "left"], /invalid --side/],
+      [["anchor", "main...feature", "src/ledger.ts:5", "-P", "tsconfig.json"], /unknown flag -P/],
+    ];
+    for (const [argv, message] of cases) {
+      const { stdout, exitCode } = await r.run(...argv);
+      expect(exitCode, argv.join(" ")).toBe(2);
+      expect(stdout).toMatch(message);
+    }
+    const swapped = toon((await r.run("anchor", "src/ledger.ts:5", "main...feature")).stdout);
+    expect(swapped["help"]).toEqual(["the diff source goes first: `ts-axi anchor main...feature src/ledger.ts:5`"]);
   });
 });

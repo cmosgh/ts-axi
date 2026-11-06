@@ -92,9 +92,9 @@ interface Input {
   missing: string[];
 }
 
-async function readStdin(): Promise<string> {
+export async function readStdin(command = "impact", example = "git diff -U0 | ts-axi impact -"): Promise<string> {
   if (process.stdin.isTTY) {
-    throw usageError("`impact -` reads a unified diff from stdin and nothing was piped", ["git diff -U0 | ts-axi impact -"]);
+    throw usageError(`\`${command} -\` reads a unified diff from stdin and nothing was piped`, [example]);
   }
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
@@ -527,7 +527,7 @@ function capped<T>(key: string, rows: T[]): Record<string, unknown> {
 }
 
 /** Quotes a value for a pasteable command. */
-function shellWord(value: string): string {
+export function shellWord(value: string): string {
   return /^[\w@%+=:,.\/-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
