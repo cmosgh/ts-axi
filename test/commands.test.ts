@@ -799,6 +799,21 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(app[0]).toMatchObject({ exported: true, signature: "controller CartCtrl($scope, priceService)" });
   });
 
+  it("def finds a function-valued member of a returned deps object, by name, Holder.member and --fuzzy", async () => {
+    expect(await names("lib/services/access-guard.js")).toEqual([
+      "2 function makeItemDeps",
+      "6 method makeItemDeps.canReadItem",
+      "9 method makeItemDeps.describeDeps",
+      "16 function guard",
+      "20 function fetchItem",
+    ]);
+    const def = await legacy("def", "canReadItem");
+    expect(def.stdout).toContain("file: lib/services/access-guard.js\nline: 6\nkind: method");
+    expect((await legacy("def", "makeItemDeps.canReadItem")).stdout).toContain("line: 6\nkind: method");
+    expect((await legacy("def", "canreaditem", "--fuzzy")).stdout).toContain("file: lib/services/access-guard.js\nline: 6");
+    expect(toon((await legacy("def", "retries")).stdout)).toMatchObject({ matches: 0 });
+  });
+
   it("def finds a controller by its registered name", async () => {
     const { stdout, exitCode } = await legacy("def", "CartCtrl");
     expect(exitCode).toBe(0);

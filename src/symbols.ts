@@ -419,21 +419,18 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     for (const statement of body.statements) {
       if (!ts.isExpressionStatement(statement) || !ts.isBinaryExpression(statement.expression)) continue;
       const { left, operatorToken, right } = statement.expression;
+      if (operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isPropertyAccessExpression(left) || left.expression.kind !== ts.SyntaxKind.ThisKeyword) continue;
+      const value = unwrap(right);
+      if (ts.isObjectLiteralExpression(value)) objectMembers(value, `${owner}.${left.name.text}`, exported);
       const fn = asFunction(right);
-      if (operatorToken.kind !== ts.SyntaxKind.EqualsToken || !fn || !ts.isPropertyAccessExpression(left) || left.expression.kind !== ts.SyntaxKind.ThisKeyword) continue;
+      if (!fn) continue;
       nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: owner, exported, signature: headUntil(statement.expression, fn, sf), namePos: left.name.getStart(sf) });
     }
   };
 
-  /** Top-level object literals returned by a factory: its API. */
-  const returnedMembers = (body: ts.ConciseBody, owner: string): void => {
-    if (ts.isObjectLiteralExpression(unwrap(body as ts.Expression))) return objectMembers(unwrap(body as ts.Expression) as ts.ObjectLiteralExpression, owner, true);
-    if (!ts.isBlock(body)) return;
-    for (const statement of body.statements) {
-      if (ts.isReturnStatement(statement) && statement.expression && ts.isObjectLiteralExpression(unwrap(statement.expression))) {
-        objectMembers(unwrap(statement.expression) as ts.ObjectLiteralExpression, owner, true);
-      }
-    }
+  /** Object literals a function returns at its top level (a factory's API, a deps object): their function-valued members. */
+  const returnedMembers = (body: ts.ConciseBody | undefined, owner: string, exported: boolean): void => {
+    if (body) for (const obj of returnedObjects(body)) objectMembers(obj, owner, exported);
   };
 
   const topLevelExported = (name: string): boolean => raws.find((r) => r.qualifiedName === name && r.parentName === undefined)?.exported ?? false;
@@ -472,7 +469,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     // The DI array is compared, not displayed: reordering injections is a contract change.
     if (inject) raws[raws.length - 1]!.signature += `\n${inject.trim()}`;
     if (CONSTRUCTOR_VERBS.has(verb)) thisMembers(fn.body, name, true);
-    if (verb === "factory" || verb === "service") returnedMembers(fn.body, name);
+    if (verb === "factory" || verb === "service") returnedMembers(fn.body, name, true);
     if (verb === "directive") for (const obj of returnedObjects(fn.body)) bindingMembers(obj, name);
     if (verb === "config" || verb === "run") routerBody(fn.body);
   };
@@ -666,15 +663,22 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     const target = compact(left, sf);
     if (target === "module.exports") {
       if (ts.isObjectLiteralExpression(right)) objectMembers(right, "exports", true);
+      else if (asFunction(right)) returnedMembers(asFunction(right)!.body, "exports", true);
       else stateArray(right);
       return;
     }
-    if (target === `exports.${left.name.text}` || target === `module.exports.${left.name.text}`) stateArray(right);
+    if (target === `exports.${left.name.text}` || target === `module.exports.${left.name.text}`) {
+      if (ts.isObjectLiteralExpression(right)) objectMembers(right, left.name.text, true);
+      else stateArray(right);
+    }
     const owner = left.expression;
     if (ts.isPropertyAccessExpression(owner) && owner.name.text === "prototype" && ts.isIdentifier(owner.expression)) {
       const cls = owner.expression.text;
       const fn = asFunction(right);
-      if (fn) nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: cls, exported: topLevelExported(cls), signature: headUntil(expr, fn, sf), namePos: left.name.getStart(sf) });
+      if (fn) {
+        nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: cls, exported: topLevelExported(cls), signature: headUntil(expr, fn, sf), namePos: left.name.getStart(sf) });
+        returnedMembers(fn.body, left.name.text, topLevelExported(cls));
+      }
       return;
     }
     if (ts.isIdentifier(left.name) && left.name.text === "prototype" && ts.isIdentifier(owner) && ts.isObjectLiteralExpression(right)) {
@@ -687,6 +691,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     if (holder === undefined) return;
     const exported = holder === "exports" || topLevelExported(holder);
     nested({ start: statement.getStart(sf), end: statement.end, kind: "method", name: left.name.text, parentName: holder, exported, signature: headUntil(expr, fn, sf), namePos: left.name.getStart(sf) });
+    returnedMembers(fn.body, left.name.text, exported);
   };
 
   /** Script-style patterns of one module-level statement; `inIife` adds the IIFE's own functions. */
@@ -694,7 +699,9 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     if (ts.isFunctionDeclaration(statement)) {
       if (!statement.name || !statement.body) return;
       if (inIife) add(statement, statement.name, statement.name.text, false);
-      if (isConstructorName(statement.name.text)) thisMembers(statement.body, statement.name.text, inIife ? false : topLevelExported(statement.name.text));
+      const exported = inIife ? false : topLevelExported(statement.name.text);
+      if (isConstructorName(statement.name.text)) thisMembers(statement.body, statement.name.text, exported);
+      returnedMembers(statement.body, statement.name.text, exported);
       if (takesRouter(statement)) routerBody(statement.body);
     } else if (ts.isVariableStatement(statement)) {
       for (const decl of statement.declarationList.declarations) {
@@ -706,6 +713,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
         const exported = inIife ? false : topLevelExported(name);
         const init = unwrap(decl.initializer);
         stateArray(init);
+        if (fn) returnedMembers(fn.body, name, exported);
         if (ts.isObjectLiteralExpression(init)) objectMembers(init, name, exported);
         else if (fn && isConstructorName(name)) thisMembers(fn.body, name, exported);
         else {
@@ -721,7 +729,9 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       else if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.EqualsToken) assignment(statement, expr);
       else callChain(expr);
     } else if (ts.isExportAssignment(statement)) {
-      stateArray(statement.expression);
+      const value = unwrap(statement.expression);
+      if (ts.isObjectLiteralExpression(value)) objectMembers(value, "default", true);
+      else stateArray(statement.expression);
     } else if (ts.isIfStatement(statement)) {
       scriptStatement(statement.thenStatement, inIife);
       if (statement.elseStatement) scriptStatement(statement.elseStatement, inIife);

@@ -632,6 +632,36 @@ describe("nested declarations", () => {
     ]);
   });
 
+  it("function-valued members of objects that leave a function, exports.x, this.x or export default; data members stay out", () => {
+    const text = [
+      "function createDeps(warn) { const n = 1; return { warn, check: async (a, b) => a, describe() {}, limit: 2 }; }",
+      "const makeApi = () => ({ load: function () {} });",
+      "exports.config = { onReady() {}, port: 80 };",
+      "exports.build = function () { return { run() {} }; };",
+      "function Panel() { this.handlers = { click: () => 1 }; }",
+      "function helper() { if (x) { return { nested() {} }; } const local = { inner() {} }; }",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual([
+      "function createDeps",
+      "method createDeps.check",
+      "method createDeps.describe",
+      "function makeApi",
+      "method makeApi.load",
+      "method config.onReady exported",
+      "method exports.build exported",
+      "method build.run exported",
+      "function Panel",
+      "method Panel.handlers.click",
+      "function helper",
+    ]);
+    expect(decls("export function useForm() { return { submit() {} }; }\nexport default { mounted() {}, name: 'x' };\n", "src/a.ts")).toEqual([
+      "function useForm exported",
+      "method useForm.submit exported",
+      "method default.mounted exported",
+    ]);
+  });
+
   it("IIFE top-level functions are local Declarations; their inner functions are not", () => {
     const text = "(function () {\n  function helper() { function inner() {} }\n  var fmt = function () {};\n  var n = 1;\n})();\n!function () { function other() {} }();\n";
     expect(decls(text)).toEqual(["function helper", "function fmt", "function other"]);
