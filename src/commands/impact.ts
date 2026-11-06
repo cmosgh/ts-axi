@@ -21,7 +21,7 @@ import {
   type DeclChange,
   type FileInput,
 } from "../impact.js";
-import { loadProject, SOURCE_EXTENSIONS, type CallSite, type ReferenceEntry, type SemanticProject, type ViaEntry } from "../project.js";
+import { loadProject, SOURCE_EXTENSIONS, type CallSite, type ReferenceEntry, type SemanticProject, type SyntacticIndex, type ViaEntry } from "../project.js";
 import { block, helpBlock, out } from "../render.js";
 import { isTestFile } from "../settings.js";
 import { isFunctionLike, type Declaration, type Kind } from "../symbols.js";
@@ -391,9 +391,54 @@ export function isUntyped(opened: Opened, decl: Declaration | undefined, file: s
   return decl?.nameless === true || opened.index.project.implicit || (file !== undefined && /\.[mc]?jsx?$/.test(file));
 }
 
-/** A non-exported, non-member, identifier-named Declaration: only its own file can name it. */
-export function isPlainLocal(decl: Declaration | undefined): decl is Declaration {
-  return decl !== undefined && !decl.exported && !decl.nameless && decl.parentName === undefined;
+/** The identifier starting at `pos`. */
+function identifierAt(node: ts.Node, pos: number, sf: ts.SourceFile): ts.Identifier | undefined {
+  if (ts.isIdentifier(node) && node.getStart(sf) === pos) return node;
+  return ts.forEachChild(node, (child) => (child.pos <= pos && pos < child.end ? identifierAt(child, pos, sf) : undefined));
+}
+
+/** Names a CommonJS file hands out (`module.exports = { a, b: c }`, `exports.x = d`); undefined when not CommonJS. */
+function commonJsExports(sf: ts.SourceFile): Set<string> | undefined {
+  const names = new Set<string>();
+  let cjs = /\brequire\s*\(/.test(sf.text);
+  // Values only: identifiers used inside exported function bodies do not leave the file.
+  const collect = (expr: ts.Expression): void => {
+    let e = expr;
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    if (ts.isIdentifier(e)) names.add(e.text);
+    else if (ts.isObjectLiteralExpression(e)) {
+      for (const p of e.properties) {
+        if (ts.isShorthandPropertyAssignment(p)) names.add(p.name.text);
+        else if (ts.isPropertyAssignment(p)) collect(p.initializer);
+        else if (ts.isSpreadAssignment(p)) collect(p.expression);
+      }
+    }
+  };
+  for (const st of sf.statements) {
+    if (!ts.isExpressionStatement(st) || !ts.isBinaryExpression(st.expression) || st.expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) continue;
+    const left = st.expression.left.getText(sf).replace(/\s+/g, "");
+    if (!/^(module\.exports|exports)(\.|$)/.test(left)) continue;
+    cjs = true;
+    collect(st.expression.right);
+  }
+  return cjs ? names : undefined;
+}
+
+/**
+ * A Declaration only its own file can name: a parameter or function-scoped binding, or a non-exported top-level
+ * binding of an ES module, or of a CommonJS file whose exports never mention it. Members, object properties,
+ * string registrations and script globals are not.
+ */
+export function isPlainLocal(index: SyntacticIndex, decl: Declaration | undefined): decl is Declaration {
+  if (decl === undefined || decl.exported || decl.nameless || decl.parentName !== undefined) return false;
+  const sf = index.sourceFile(index.abs(decl.file));
+  const id = sf && identifierAt(sf, decl.namePos, sf);
+  if (!sf || !id) return false;
+  const owner = id.parent;
+  if (ts.isPropertyAssignment(owner) || ts.isShorthandPropertyAssignment(owner) || ts.isMethodDeclaration(owner) || ts.isPropertyAccessExpression(owner)) return false;
+  for (let n: ts.Node = owner.parent; !ts.isSourceFile(n); n = n.parent) if (ts.isFunctionLike(n)) return true;
+  if (ts.isExternalModule(sf)) return true;
+  return commonJsExports(sf)?.has(decl.name) === false;
 }
 
 export interface TextualCount {
@@ -680,7 +725,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   }
   for (const row of rows) {
     if (!row.live || !isUntyped(opened, row.live, row.live.file)) continue;
-    const localTo = isPlainLocal(row.live) ? new Map([[row.live.name, opened.index.abs(row.live.file)]]) : undefined;
+    const localTo = isPlainLocal(opened.index, row.live) ? new Map([[row.live.name, opened.index.abs(row.live.file)]]) : undefined;
     const needle = textualNeedle(row.live);
     if (!needle) continue;
     row.textual = textualCount(opened, needle, changeSet, localTo?.get(row.live.name));
@@ -762,7 +807,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     if (!needle) continue;
     if (!textNames.has(needle.text)) textNames.set(needle.text, needle);
     const abs = opened.index.abs(decl.file);
-    if (!isPlainLocal(decl) || (localTo.has(name) && localTo.get(name) !== abs)) wide.add(name);
+    if (!isPlainLocal(opened.index, decl) || (localTo.has(name) && localTo.get(name) !== abs)) wide.add(name);
     else localTo.set(name, abs);
   }
   for (const name of wide) localTo.delete(name);

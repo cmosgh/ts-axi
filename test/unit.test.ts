@@ -34,7 +34,8 @@ import {
   wordMatches,
   type FileInput,
 } from "../src/impact.js";
-import { parseSource } from "../src/project.js";
+import { parseSource, type SyntacticIndex } from "../src/project.js";
+import { isPlainLocal } from "../src/commands/impact.js";
 import { collectDeclarations, registrationOf } from "../src/symbols.js";
 import { matchRows, MATCH_ROWS, narrowHints } from "../src/commands/common.js";
 import { groupSymbols } from "../src/symbols.js";
@@ -865,5 +866,32 @@ describe("template usages", () => {
   it("controllers in ng-controller, filters after a single pipe", () => {
     expect(lines('<div ng-controller="CartCtrl as c">\n<div data-ng-controller=\'CartCtrlX\'>', "CartCtrl")).toEqual([1]);
     expect(lines("{{ a | money }}\n{{ a || money }}\n{{ a |money:2 }}", "money")).toEqual([1, 3]);
+  });
+});
+
+describe("textual scope (isPlainLocal)", () => {
+  /** Whether the textual count of `name` stays in its declaring file. */
+  const local = (file: string, text: string, name: string) => {
+    const sf = parseSource(file, text);
+    const index = { abs: (rel: string) => rel, sourceFile: () => sf } as unknown as SyntacticIndex;
+    return isPlainLocal(index, collectDeclarations(sf, file).find((d) => d.name === name));
+  };
+
+  it("function-scoped bindings and private ES module bindings are local", () => {
+    expect(local("a.js", "(function () { function helper() {} })();", "helper")).toBe(true);
+    expect(local("a.ts", "import x from 'x';\nconst hidden = 1;\nexport const shown = hidden;", "hidden")).toBe(true);
+  });
+
+  it("a CommonJS top-level binding is local unless an exports assignment hands it out", () => {
+    const text = "const TAX = 1;\nfunction calc() { return TAX; }\nfunction inner() {}\nmodule.exports = { calc, run() { return TAX; } };\nexports.extra = inner;";
+    expect(local("a.js", text, "TAX")).toBe(true);
+    expect(local("a.js", text, "calc")).toBe(false);
+    expect(local("a.js", text, "inner")).toBe(false);
+    expect(local("a.js", "const fs = require('fs');\nfunction privateOne() {}", "privateOne")).toBe(true);
+  });
+
+  it("a script's top-level binding is a global; members are never local", () => {
+    expect(local("a.js", "function shared() {}", "shared")).toBe(false);
+    expect(local("a.js", "function make() { return { item: () => 1 }; }", "item")).toBe(false);
   });
 });

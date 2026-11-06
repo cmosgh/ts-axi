@@ -949,6 +949,17 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(((grep["unresolved"] as Payload[] | number | undefined) ?? 0)).toEqual(0);
   });
 
+  it("textual counts project-wide for what leaves the file: a returned member, an argument object's property, a CommonJS export", async () => {
+    const member = toon((await legacy("refs", "lib/services/access-guard.js:6")).stdout);
+    expect(member).toMatchObject({ refs_total: 2, textual: "4 matches in 2 files" });
+    expect(member["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs lib/services/access-guard.js:6 --grep` for the 2 textual matches the checker cannot resolve (untyped JavaScript)"]));
+    expect(toon((await legacy("refs", "lib/services/access-guard.test.js:4")).stdout)).toMatchObject({ refs_total: 0, textual: "4 matches in 2 files" });
+    expect(toon((await legacy("refs", "guard", "--in", "lib")).stdout)).toMatchObject({ textual: "4 matches in 2 files" });
+    // Not in module.exports: its own file only.
+    expect(toon((await legacy("refs", "fetchItem")).stdout)).toMatchObject({ textual: "1 matches in this file" });
+    expect(toon((await legacy("refs", "TAX")).stdout)).toMatchObject({ textual: "2 matches in this file" });
+  });
+
   it("refs on a state resolve key prints no textual line - the key is injected by name, not imported", async () => {
     const out = (await legacy("refs", "client/outbound.states.js:9")).stdout;
     expect(out).toContain("symbol: states.main.warehouse.outbound.outboundInit.resolve.docks");
