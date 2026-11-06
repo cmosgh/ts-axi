@@ -7,4 +7,6 @@ async function check() {
   return deps.canReadItem("doc", 3, "t");
 }
 
-check();
+const firstId = 1, lastId = 9;
+
+check(firstId, lastId);

@@ -129,6 +129,10 @@ describe("def", () => {
     expect(stdout).not.toContain("elapsed_ms");
   });
 
+  it("a constructor line names the constructor, not its parameter properties", async () => {
+    expect((await run("def", "src/models/user.ts:10")).stdout).toContain("line: 10\nkind: method\nexported: true\nsignature: \"constructor(");
+  });
+
   it("follows a reference position to its Declaration", async () => {
     const { stdout } = await run("def", "src/services/sync.ts:13:15");
     expect(stdout).toContain("file: src/models/user.ts\nline: 13");
@@ -811,6 +815,15 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(def.stdout).toContain("file: lib/services/access-guard.js\nline: 6\nkind: method");
     expect((await legacy("def", "makeItemDeps.canReadItem")).stdout).toContain("line: 6\nkind: method");
     expect((await legacy("def", "canreaditem", "--fuzzy")).stdout).toContain("file: lib/services/access-guard.js\nline: 6");
+  });
+
+  it("a line-only position names the declaration that starts the line, not its parameters; siblings stay ambiguous", async () => {
+    expect(toon((await legacy("refs", "lib/services/access-guard.js:6")).stdout)).toMatchObject({ symbol: "makeItemDeps.canReadItem", kind: "method" });
+    // Not indexed (an argument object): the function-valued property still outranks the callee and the arguments.
+    expect(toon((await legacy("refs", "lib/services/access-guard.test.js:4")).stdout)).toMatchObject({ symbol: "canReadItem", declared_at: "lib/services/access-guard.test.js:4" });
+    const siblings = toon((await legacy("refs", "lib/services/access-guard.test.js:10")).stdout);
+    expect(siblings).toMatchObject({ ambiguous: "2 identifiers on the line - add a column" });
+    expect(siblings["identifiers"]).toEqual([{ name: "firstId", line: 10, col: 7 }, { name: "lastId", line: 10, col: 20 }]);
   });
 
   it("a name with no Declaration: def and refs hint at its textual matches, refs --grep lists them", async () => {
