@@ -29,8 +29,11 @@ export interface Recall {
   listed: number;
   /** hits not listed but covered by a `textual` / `templates` count. */
   counted: number;
+  /** impact: hits not listed on lines the diff adds (impact reports References outside the change set). */
+  inDiff: number;
   /** hits ts-axi neither lists nor counts, as `file:line: text`. */
   missing: string[];
+  missingHits: Hit[];
 }
 
 export interface TaskResult {
@@ -49,11 +52,16 @@ export interface TaskResult {
 
 const READ_CONTEXT = 40;
 const TEMPLATE_FILE = /\.(?:html?|ejs|hbs|njk|pug)$/;
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?)$/;
+/** Code an agent would open: sources and templates, not docs or lockfiles. */
+const isCodeFile = (file: string) => SOURCE_FILE.test(file) || TEMPLATE_FILE.test(file);
 const IMPORT_LINE = /^\s*(?:import\b|export\s+(?:\*|\{[^}]*\})\s+from\b)|^\s*(?:const|let|var)\s+\{[^}]*\}\s*=\s*require\(/;
 
 async function git(dir: string, args: string[]): Promise<string> {
   try {
-    return (await execFileAsync("git", args, { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout;
+    // No optional index refresh: the analysed repo stays untouched.
+    const env = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+    return (await execFileAsync("git", args, { cwd: dir, env, maxBuffer: 64 * 1024 * 1024 })).stdout;
   } catch (error) {
     const e = error as { code?: number; stdout?: string };
     if (e.code === 1 && args[0] === "grep") return ""; // no match
@@ -148,6 +156,22 @@ export interface Hit extends Location {
   text: string;
   /** What the grep matched, to find the occurrence again in the line. */
   needle: RegExp;
+  /** impact: the diff adds this line, so it is part of the change set impact reports around. */
+  inDiff?: boolean;
+}
+
+/** New-side `file:line` of every `+` line in a unified diff. */
+function addedLines(diff: string): Set<string> {
+  const added = new Set<string>();
+  let file = "";
+  let line = 0;
+  for (const row of diff.split("\n")) {
+    if (row.startsWith("+++ ")) file = row.slice(4).replace(/^b\//, "");
+    else if (row.startsWith("@@")) line = Number(/\+(\d+)/.exec(row)?.[1] ?? 0);
+    else if (row.startsWith("+")) added.add(`${file}:${line++}`);
+    else if (row.startsWith(" ")) line++;
+  }
+  return added;
 }
 
 function parseGrep(stdout: string, needle: RegExp): Hit[] {
@@ -234,20 +258,25 @@ async function grepWorkflow(dir: string, task: Task): Promise<{ text: string; hi
     hits = hits.filter((h) => declares(h.text, name));
     toRead = hits;
   } else {
-    const names = task.kind === "impact" ? task.symbol.split(",").map((s) => s.trim()) : [task.symbol];
     if (task.kind === "impact") {
       const range = task.range ? [task.range] : [];
       commands.push(`git diff ${range.join(" ")}`.trim());
-      text += await git(dir, ["diff", ...range]);
-    }
-    for (const symbol of names) {
-      const name = lastSegment(symbol);
-      if (task.kind === "refs" && ownerOf(symbol)) {
-        // A member: its `.name` accesses, not every local that shares the name.
-        hits.push(...(await grep(["-E", `\\.${name}${ereEnd}`], new RegExp(`\\.${escapeRe(name)}(?![\\w$])`, "g"))));
-      } else {
-        hits.push(...(await grep(["-w", name], wordRe(name))));
+      const diff = await git(dir, ["diff", ...range]);
+      text += diff;
+      // Every changed name in one call: `-w -e a -e b`.
+      const names = task.symbol.split(",").map((s) => lastSegment(s.trim()));
+      const needle = new RegExp(`(?<!\\w)(?:${names.map(escapeRe).join("|")})(?!\\w)`, "g");
+      const added = addedLines(diff);
+      for (const h of await grep(["-w", ...names.flatMap((n) => ["-e", n])], needle)) {
+        hits.push({ ...h, inDiff: added.has(`${h.file}:${h.line}`) });
       }
+    } else if (task.kind === "refs" && ownerOf(task.symbol)) {
+      // A member: its `.name` accesses, not every local that shares the name.
+      const name = lastSegment(task.symbol);
+      hits.push(...(await grep(["-E", `\\.${name}${ereEnd}`], new RegExp(`\\.${escapeRe(name)}(?![\\w$])`, "g"))));
+    } else {
+      const name = lastSegment(task.symbol);
+      hits.push(...(await grep(["-w", name], wordRe(name))));
       if (task.templates && kebab(name) !== name) hits.push(...(await grep(["-w", kebab(name)], wordRe(kebab(name)))));
     }
     toRead = hits;
@@ -258,7 +287,7 @@ async function grepWorkflow(dir: string, task: Task): Promise<{ text: string; hi
     if (!files.has(file)) files.set(file, readFileSync(join(dir, file), "utf8").replace(/\n$/, "").split("\n"));
     return files.get(file)!;
   };
-  for (const read of readWindows(toRead, (f) => linesOf(f).length)) {
+  for (const read of readWindows(toRead.filter((h) => isCodeFile(h.file)), (f) => linesOf(f).length)) {
     commands.push(`read ${read.file}:${read.from}-${read.to}`);
     text += renderRead(linesOf(read.file), read);
   }
@@ -319,6 +348,7 @@ function classify(line: string): ("code" | "string" | "comment")[] {
 
 /** A hit whose every occurrence sits in a comment or a string is not a use (templates excepted). */
 function isCodeHit(hit: Hit, task: Task): boolean {
+  if (!isCodeFile(hit.file)) return false;
   if (TEMPLATE_FILE.test(hit.file)) return true;
   // An import or re-export names a function without calling it; any other non-call use stays a hit.
   if (task.kind === "callers" && IMPORT_LINE.test(hit.text)) return false;
@@ -353,6 +383,20 @@ export async function compareTask(cli: string, dir: string, task: Task): Promise
   };
 }
 
+/** The declarations a task is about: `declared_at`, a def's location, impact's changed rows. */
+export function targetsOf(axiOutputs: string[]): Set<string> {
+  const targets = new Set<string>();
+  for (const stdout of axiOutputs) {
+    const decl = /^declared_at: "?([^"\n]+:\d+)"?$/m.exec(stdout)?.[1];
+    if (decl) targets.add(decl);
+    const file = /^file: (.+)$/m.exec(stdout)?.[1];
+    const line = /^line: (\d+)$/m.exec(stdout)?.[1];
+    if (file && line) targets.add(`${file}:${line}`);
+    for (const m of stdout.matchAll(/^ {2}[^,\n]+,[^,\n]+,"([^"]+:\d+)",/gm)) targets.add(m[1]!);
+  }
+  return targets;
+}
+
 /** Which grep hits that are real uses the ts-axi outputs list, count, or miss. */
 export function recallOf(axiOutputs: string[], grepHits: Hit[], task: Task): Recall {
   const { listed, counted } = axiLocations(axiOutputs);
@@ -363,22 +407,27 @@ export function recallOf(axiOutputs: string[], grepHits: Hit[], task: Task): Rec
     seen.add(key);
     return true;
   });
-  const unlisted = hits.filter((h) => !listed.has(`${h.file}:${h.line}`));
-  const listedHits = hits.length - unlisted.length;
+  const notListed = hits.filter((h) => !listed.has(`${h.file}:${h.line}`));
+  const listedHits = hits.length - notListed.length;
+  const unlisted = notListed.filter((h) => !h.inDiff);
   // A count covers what it counts beyond the rows already listed, never more.
   const byCount = unlisted.length <= Math.max(0, counted - listedHits) ? unlisted.length : 0;
+  const missingHits = byCount ? [] : unlisted;
   return {
     hits: hits.length,
     listed: listedHits,
     counted: byCount,
-    missing: byCount ? [] : unlisted.map((h) => `${h.file}:${h.line}: ${h.text.trim()}`),
+    inDiff: notListed.length - unlisted.length,
+    missing: missingHits.map((h) => `${h.file}:${h.line}: ${h.text.trim()}`),
+    missingHits,
   };
 }
 
 export function recallLabel(r: Recall): string {
   if (r.hits === 0) return "n/a (0 hits)";
   const pct = Math.floor(((r.hits - r.missing.length) / r.hits) * 100);
-  return `${pct}% (${r.hits - r.missing.length}/${r.hits}${r.counted ? `, ${r.counted} by count` : ""})`;
+  const extra = [r.counted && `${r.counted} by count`, r.inDiff && `${r.inDiff} in the diff`].filter(Boolean);
+  return `${pct}% (${r.hits - r.missing.length}/${r.hits}${extra.length ? `, ${extra.join(", ")}` : ""})`;
 }
 
 /** Markdown table; `repo` labels each row. */
