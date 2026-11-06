@@ -8,6 +8,12 @@ export interface DiffLine {
   text: string;
 }
 
+/** An unchanged line shown in a hunk, with its number on each side. */
+export interface ContextLine {
+  oldLine: number;
+  newLine: number;
+}
+
 export interface Hunk {
   oldStart: number;
   oldLines: number;
@@ -15,6 +21,7 @@ export interface Hunk {
   newLines: number;
   removed: DiffLine[];
   added: DiffLine[];
+  context: ContextLine[];
 }
 
 export interface FileDiff {
@@ -24,6 +31,8 @@ export interface FileDiff {
   oldPath: string | undefined;
   status: FileStatus;
   hunks: Hunk[];
+  /** A binary entry (no hunks); only returned with `{ binary: true }`. */
+  binary?: true;
 }
 
 export type Range = [start: number, end: number];
@@ -85,8 +94,8 @@ function parseGitHeader(rest: string): [string | undefined, string | undefined] 
   return m ? [m[1], m[2]] : [undefined, undefined];
 }
 
-function finish(draft: Draft): FileDiff | undefined {
-  if (draft.binary) return undefined;
+function finish(draft: Draft, keepBinary: boolean): FileDiff | undefined {
+  if (draft.binary && !keepBinary) return undefined;
   const isNew = draft.newMode || draft.minus === null;
   const isDeleted = draft.deletedMode || draft.plus === null;
   const oldP = draft.renameFrom ?? (draft.minus ? draft.minus : undefined) ?? draft.gitOld;
@@ -102,14 +111,16 @@ function finish(draft: Draft): FileDiff | undefined {
     oldPath: status === "renamed" ? oldP : undefined,
     status,
     hunks: draft.hunks,
+    ...(draft.binary ? { binary: true as const } : {}),
   };
 }
 
 /**
- * Parse git-style unified diff text. Binary files are skipped; files with no
- * hunks (pure renames, mode changes) are kept with `hunks: []`.
+ * Parse git-style unified diff text. Binary files are skipped unless `binary` is set; files
+ * with no hunks (pure renames, mode changes) are kept with `hunks: []`. Splits on `\n` only,
+ * so `\r`, U+2028 or U+2029 inside a line never shift the numbering.
  */
-export function parseUnifiedDiff(text: string): FileDiff[] {
+export function parseUnifiedDiff(text: string, options: { binary?: boolean } = {}): FileDiff[] {
   const files: FileDiff[] = [];
   let draft: Draft | undefined;
   let hunk: Hunk | undefined;
@@ -120,7 +131,7 @@ export function parseUnifiedDiff(text: string): FileDiff[] {
 
   const flush = (): void => {
     if (draft) {
-      const file = finish(draft);
+      const file = finish(draft, options.binary === true);
       if (file) files.push(file);
     }
     draft = undefined;
@@ -145,6 +156,7 @@ export function parseUnifiedDiff(text: string): FileDiff[] {
         continue;
       }
       if (tag === " " || line === "") {
+        hunk.context.push({ oldLine: oldNo, newLine: newNo });
         oldNo++;
         newNo++;
         oldLeft--;
@@ -173,6 +185,7 @@ export function parseUnifiedDiff(text: string): FileDiff[] {
         newLines: h[4] === undefined ? 1 : Number(h[4]),
         removed: [],
         added: [],
+        context: [],
       };
       draft.hunks.push(hunk);
       oldLeft = hunk.oldLines;
@@ -248,4 +261,13 @@ export function baseRevOfRange(range?: string): string {
   const index = triple !== -1 ? triple : range.indexOf("..");
   if (index === -1) return range;
   return range.slice(0, index) || "HEAD";
+}
+
+/** Right side of a range; undefined when git diffs it against the working tree (`abc123`). */
+export function headRevOfRange(range: string): string | undefined {
+  const triple = range.indexOf("...");
+  if (triple > 0) return range.slice(triple + 3) || "HEAD";
+  const double = range.indexOf("..");
+  if (double > 0) return range.slice(double + 2) || "HEAD";
+  return undefined;
 }

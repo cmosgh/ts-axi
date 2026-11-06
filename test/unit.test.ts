@@ -214,6 +214,7 @@ describe("parseUnifiedDiff", () => {
         { line: 3, text: "  const x = 1;" },
         { line: 4, text: "  return x;" },
       ],
+      context: [],
     });
     expect(file!.hunks[1]).toMatchObject({ oldStart: 10, oldLines: 2, newStart: 11, newLines: 0 });
     expect(file!.hunks[1]!.removed.map((l) => l.line)).toEqual([10, 11]);
@@ -315,6 +316,65 @@ describe("parseUnifiedDiff", () => {
     const diff = ['diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"', '--- "a/caf\\303\\251.ts"', '+++ "b/caf\\303\\251.ts"', "@@ -1 +1 @@", "-a", "+b"].join("\n");
     expect(parseUnifiedDiff(diff)[0]!.path).toBe("café.ts");
     expect(parseUnifiedDiff("")).toEqual([]);
+  });
+
+  it("keeps context lines with their number on both sides", () => {
+    const diff = [
+      "--- a/m.ts",
+      "+++ b/m.ts",
+      "@@ -4,6 +4,7 @@ class Box",
+      " one",
+      " two",
+      "-three",
+      "+THREE",
+      "+three-and-a-half",
+      " four",
+      "",
+      " six",
+    ].join("\n");
+    const [file] = parseUnifiedDiff(diff);
+    const hunk = file!.hunks[0]!;
+    expect(hunk.context).toEqual([
+      { oldLine: 4, newLine: 4 },
+      { oldLine: 5, newLine: 5 },
+      { oldLine: 7, newLine: 8 },
+      { oldLine: 8, newLine: 9 },
+      { oldLine: 9, newLine: 10 },
+    ]);
+    expect(hunk.removed).toEqual([{ line: 6, text: "three" }]);
+    expect(hunk.added.map((l) => l.line)).toEqual([6, 7]);
+  });
+
+  it("handles zero-length hunks on either side", () => {
+    const diff = ["--- a/z.ts", "+++ b/z.ts", "@@ -5,0 +6,2 @@", "+a", "+b", "@@ -30,2 +31,0 @@", "-c", "-d"].join("\n");
+    const [file] = parseUnifiedDiff(diff);
+    expect(file!.hunks.map((h) => [h.oldStart, h.oldLines, h.newStart, h.newLines])).toEqual([[5, 0, 6, 2], [30, 2, 31, 0]]);
+    expect(changedRanges(file!)).toEqual({ after: [[6, 7]], before: [[30, 31]] });
+    expect(file!.hunks.every((h) => h.context.length === 0)).toBe(true);
+  });
+
+  it("does not count the no-newline marker or split on \\r, U+2028 or U+2029", () => {
+    const diff = [
+      "--- a/w.ts",
+      "+++ b/w.ts",
+      "@@ -1,3 +1,3 @@",
+      " a\r",
+      " b still b still b",
+      "-c",
+      "\\ No newline at end of file",
+      "+c2",
+      "\\ No newline at end of file",
+    ].join("\n");
+    const hunk = parseUnifiedDiff(diff)[0]!.hunks[0]!;
+    expect(hunk.context).toEqual([{ oldLine: 1, newLine: 1 }, { oldLine: 2, newLine: 2 }]);
+    expect(hunk.removed).toEqual([{ line: 3, text: "c" }]);
+    expect(hunk.added).toEqual([{ line: 3, text: "c2" }]);
+  });
+
+  it("returns binary entries only when asked", () => {
+    const diff = ["diff --git a/logo.png b/logo.png", "index 1111111..2222222 100644", "Binary files a/logo.png and b/logo.png differ", ""].join("\n");
+    expect(parseUnifiedDiff(diff)).toEqual([]);
+    expect(parseUnifiedDiff(diff, { binary: true })).toEqual([{ path: "logo.png", oldPath: undefined, status: "modified", hunks: [], binary: true }]);
   });
 });
 

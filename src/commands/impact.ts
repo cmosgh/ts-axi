@@ -4,7 +4,7 @@ import { basename, dirname, join, relative, sep } from "node:path";
 import ts from "typescript";
 import { bool, flag, intFlag, parseArgs, parseFields, type ParsedArgs } from "../args.js";
 import type { CommandContext } from "../context.js";
-import { changedRanges, parseUnifiedDiff, type FileDiff, type Range } from "../diff.js";
+import { changedRanges, headRevOfRange, parseUnifiedDiff, type FileDiff, type Range } from "../diff.js";
 import { AxiError, usageError } from "../errors.js";
 import { diffNameStatus, diffUnified, isGitRepo, resolveBaseRev, showFile, untrackedFiles } from "../git.js";
 import {
@@ -110,14 +110,6 @@ function readText(abs: string): string | null {
   }
 }
 
-/** Right side of a range; undefined when git diffs it against the working tree (`abc123`). */
-function headOfRange(range: string): string | undefined {
-  const triple = range.indexOf("...");
-  if (triple > 0) return range.slice(triple + 3) || "HEAD";
-  const double = range.indexOf("..");
-  if (double > 0) return range.slice(double + 2) || "HEAD";
-  return undefined;
-}
 
 async function gitInput(cwd: string, root: string, range: string | undefined, staged: boolean): Promise<Input> {
   if (!(await isGitRepo(cwd))) {
@@ -128,7 +120,7 @@ async function gitInput(cwd: string, root: string, range: string | undefined, st
   const [diffText, names] = await Promise.all([diffUnified(cwd, range, staged), diffNameStatus(cwd, range, staged)]);
   const parsed = parseUnifiedDiff(diffText);
   const base = staged ? "HEAD" : await resolveBaseRev(cwd, range);
-  const headRev = staged ? "" : range !== undefined ? headOfRange(range) : undefined;
+  const headRev = staged ? "" : range !== undefined ? headRevOfRange(range) : undefined;
   const files: FileInput[] = [];
   for (const diff of parsed) {
     const { after, before } = changedRanges(diff);

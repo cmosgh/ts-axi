@@ -181,10 +181,10 @@ export async function untrackedFiles(cwd: string): Promise<string[]> {
   return stdout.split("\0").filter((p) => p !== "");
 }
 
-/** Raw unified diff with zero context lines; same target rules as `diffNameStatus`. */
-export async function diffUnified(cwd: string, range?: string, staged?: boolean): Promise<string> {
+/** Raw unified diff with `context` lines around each change (default 0); same target rules as `diffNameStatus`. */
+export async function diffUnified(cwd: string, range?: string, staged?: boolean, context = 0): Promise<string> {
   const target = await diffTarget(cwd, range, staged);
-  return runOrThrow(cwd, ["diff", "-U0", "--no-color", "--no-ext-diff", "-M", ...target, "--"]);
+  return runOrThrow(cwd, ["diff", `-U${context}`, "--no-color", "--no-ext-diff", "-M", ...target, "--"]);
 }
 
 /** File content at `rev`, or `null` when the path does not exist there. */
