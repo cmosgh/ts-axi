@@ -1,0 +1,15 @@
+{
+  "home": 241,
+  "def member": 114,
+  "def no match": 21,
+  "refs": 169,
+  "callers": 143,
+  "outline": 161,
+  "refs legacy directive": 196,
+  "impact": 235,
+  "impact --fields all": 231,
+  "impact --size": 274,
+  "anchor": 134,
+  "error unknown flag": 60,
+  "error missing file": 33
+}
