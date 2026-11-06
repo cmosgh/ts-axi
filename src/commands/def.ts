@@ -30,7 +30,7 @@ flags[8]:
 output:
   1 match = file, line, kind, exported, signature + body fenced with file line numbers
   several = matches[n]{at,kind,signature} (at = path:line) (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms (--in, --kind, Class.member, --exported) with how many each keeps
-  none = matches: 0 + did_you_mean
+  none = matches: 0 + did_you_mean; when the name still occurs in Project files, help gives the refs --grep that lists those textual matches
 examples[5]:
   ts-axi def User
   ts-axi def User.save
