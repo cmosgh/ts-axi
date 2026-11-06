@@ -683,6 +683,14 @@ describe("impact", () => {
       expect(changed(await impact(r))).toEqual([expect.objectContaining({ symbol: "fancyBox", change: "body", templates: 2 })]);
     });
 
+    it("a body edit of a nested function a service exposes through self names the member, with its DI use", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/item-store.js", 'return http.get("items/" + id);', 'return http.get("item/" + id);');
+      const data = await impact(r);
+      expect(data).not.toHaveProperty("file_level");
+      expect(changed(data)).toEqual([expect.objectContaining({ symbol: "itemStore.loadItem", kind: "method", change: "body", at: "client/item-store.js:19", refs_outside: 0, textual: 1 })]);
+    });
+
     it("a DI array or parameter change of a registration is a signature change", async () => {
       const r = repo(LEGACY_FIXTURE);
       r.edit("client/app.js", '["$scope", "priceService", function ($scope, priceService)', '["$scope", "taxService", function ($scope, priceService)');
@@ -938,6 +946,68 @@ describe("legacy JavaScript outline / def / refs", () => {
       expect(toon((await legacy("refs", target)).stdout), target).toMatchObject({ symbol: "PanelCtrl", templates: "1 usages in 1 files" });
     }
     expect(toon((await legacy("refs", "fancyBox.boxTitle")).stdout)).toMatchObject({ templates: "1 usages in 1 files" });
+  });
+
+  it("self = this members and factory objects: outline lists nested functions once, data properties stay out", async () => {
+    // The registration and the function it names share a line, as for fancyBox.
+    expect(await names("client/item-store.js")).toEqual([
+      "7 function itemStore",
+      "7 function itemStore",
+      "14 method itemStore.reset",
+      "19 method itemStore.loadItem",
+      "23 method itemStore.saveItem",
+      "27 method itemStore.purgeItem",
+    ]);
+    expect(await names("client/item-factory.js")).toEqual([
+      "4 function itemFactory",
+      "17 function labelFactory",
+      "4 function itemFactory",
+      "8 method itemFactory.loadList",
+      "12 method itemFactory.countItems",
+      "17 function labelFactory",
+      "20 method labelFactory.formatLabel",
+      "24 method labelFactory.trimLabel",
+    ]);
+    // const and let aliases.
+    expect(await names("client/shelf.controller.js")).toEqual([
+      "4 function ShelfCtrl",
+      "14 function BinCtrl",
+      "4 function ShelfCtrl",
+      "9 method ShelfCtrl.restock",
+      "14 function BinCtrl",
+      "18 method BinCtrl.empty",
+    ]);
+  });
+
+  it("def finds a self member by Owner.member and by name, with the nested function's body", async () => {
+    for (const target of ["itemStore.loadItem", "loadItem"]) {
+      const { stdout } = await legacy("def", target);
+      expect(stdout, target).toContain("file: client/item-store.js\nline: 19\nkind: method\nexported: true\nsignature: function loadItem(id)");
+      expect(fence(stdout), target).toContain('return http.get("items/" + id);');
+    }
+    expect((await legacy("def", "purgeItem")).stdout).toContain("line: 27\nkind: method");
+  });
+
+  it("the function line and the aliasing line both resolve to the member; a shared shorthand line asks for a column", async () => {
+    for (const target of ["client/item-store.js:19", "client/item-store.js:9", "client/item-store.js:9:24"]) {
+      expect(toon((await legacy("refs", target)).stdout), target).toMatchObject({ symbol: "itemStore.loadItem", declared_at: "client/item-store.js:19" });
+    }
+    expect(toon((await legacy("refs", "client/shelf.controller.js:6")).stdout)).toMatchObject({ symbol: "ShelfCtrl.restock" });
+    const shared = toon((await legacy("refs", "client/item-factory.js:18")).stdout);
+    expect(shared["identifiers"]).toEqual([{ name: "formatLabel", line: 18, col: 14 }, { name: "trimLabel", line: 18, col: 40 }]);
+    expect(toon((await legacy("refs", "client/item-factory.js:18:40")).stdout)).toMatchObject({ symbol: "labelFactory.trimLabel", declared_at: "client/item-factory.js:24" });
+  });
+
+  it("refs on a self member counts DI uses in other files textually and --grep lists them", async () => {
+    const data = toon((await legacy("refs", "itemStore.loadItem")).stdout);
+    // The aliasing line is part of the Declaration, not a use.
+    expect(data).toMatchObject({ refs_total: 0, textual: "1 matches in 1 files" });
+    expect(data["help"]).toEqual(
+      expect.arrayContaining(["Run `ts-axi refs client/item-store.js:19 --grep` for the 1 textual matches the checker cannot resolve (untyped JavaScript)"]),
+    );
+    const grep = toon((await legacy("refs", "itemStore.loadItem", "--grep")).stdout);
+    expect(grep["unresolved"]).toEqual([{ file: "client/item-view.controller.js", line: 6, context: "return itemStore.loadItem(id).then(function () {" }]);
+    expect(toon((await legacy("refs", "itemFactory.loadList")).stdout)).toMatchObject({ textual: "1 matches in 1 files" });
   });
 
   it("a binding on a multi-line tag counts past a quoted '>' in an earlier attribute", async () => {

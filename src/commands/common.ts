@@ -314,7 +314,8 @@ export function resolvePosition(index: SyntacticIndex, cwd: string, target: Extr
     return start >= lineStart && start < lineEnd;
   });
   const decls = index.declarations(abs);
-  const declFor = (id: ts.Node): Declaration | undefined => decls.find((d) => d.namePos === id.getStart(sf));
+  // `self.loadItem = loadItem`: the member name there stands for the nested function's member too.
+  const declFor = (id: ts.Node): Declaration | undefined => decls.find((d) => d.namePos === id.getStart(sf)) ?? decls.find((d) => d.aliasPos === id.getStart(sf));
   const pick = (id: ts.Identifier | ts.PrivateIdentifier): PositionResolution => {
     const decl = declFor(id);
     return decl ? { kind: "decl", decl, abs } : { kind: "ident", abs, pos: id.getStart(sf), name: id.text };
