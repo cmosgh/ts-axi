@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { compareTask, recallLabel, reportTable, targetsOf, type Hit, type Task, type TaskResult } from "../test/compare.js";
+import { compareTask, recallLabel, reportTable, speedTable, targetsOf, TURN_MS, type Hit, type Task, type TaskResult } from "../test/compare.js";
 
 const KINDS = new Set(["def", "callers", "refs", "impact"]);
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "bin", "ts-axi.js");
@@ -30,7 +30,9 @@ for (const t of tasks) {
 const results: TaskResult[] = [];
 for (const task of tasks) results.push(await compareTask(CLI, repo, task));
 
-process.stdout.write(reportTable(results.map((result) => ({ repo: "target", result }))));
+const rows = results.map((result) => ({ repo: "target", result }));
+process.stdout.write(reportTable(rows));
+process.stdout.write(`\n${speedTable(rows)}\nEstimated task time = command time + ${TURN_MS / 1000} s per tool call (an assumed model round-trip).\n`);
 for (const r of results) {
   process.stdout.write(`\n${r.task.name}: ${recallLabel(r.recall)}\n  ts-axi: ${r.axiCommands.join(" ; ")}\n  grep:   ${r.grepCommands.filter((c) => !c.startsWith("read ")).join(" ; ")} ; ${r.grepCommands.filter((c) => c.startsWith("read ")).length} reads\n`);
   if (!r.recall.missingHits.length) continue;
