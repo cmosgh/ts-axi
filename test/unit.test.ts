@@ -35,7 +35,7 @@ import {
   type FileInput,
 } from "../src/impact.js";
 import { parseSource } from "../src/project.js";
-import { collectDeclarations } from "../src/symbols.js";
+import { collectDeclarations, registrationOf } from "../src/symbols.js";
 import { matchRows, MATCH_ROWS, narrowHints } from "../src/commands/common.js";
 import { groupSymbols } from "../src/symbols.js";
 import { kebab, templateTarget, usagesIn } from "../src/templates.js";
@@ -606,6 +606,41 @@ describe("nested declarations", () => {
     expect(main).toMatchObject({ name: "MainCtrl", parentName: "controller", signature: "controller MainCtrl($scope)" });
     // The DI array is compared but not displayed.
     expect(main.fullSignature).toBe("controller MainCtrl($scope)\n['$scope']");
+  });
+
+  it("a registration by identifier links to the same-scope function, declared before or after (hoisted)", () => {
+    const text = [
+      "(function () {",
+      "  angular.module('m').directive('fancyBox', fancyBox).factory('store', ['$http', makeStore]).config(routes);",
+      "  fancyBox.$inject = ['$uibModal'];",
+      "  function fancyBox($uibModal) { return { scope: { size: '@' }, link: function () {} }; }",
+      "  function makeStore($http) { return { load: function () {} }; }",
+      "  function routes($stateProvider) { $stateProvider.state('home', { url: '/' }); }",
+      "  angular.module('m').filter('short', short);",
+      "  var short = function () { return function (s) { return s; }; };",
+      "})();",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual([
+      "function fancyBox exported nameless",
+      "function store exported nameless",
+      "function config exported nameless",
+      "function fancyBox",
+      "property fancyBox.size exported",
+      "function makeStore",
+      "method store.load exported",
+      "function routes",
+      "state states.home exported nameless",
+      "function short exported nameless",
+      "function short",
+    ]);
+    const all = collectDeclarations(parseSource("src/a.js", text), "src/a.js");
+    const reg = all.find((d) => d.nameless && d.name === "fancyBox")!;
+    const fn = all.find((d) => !d.nameless && d.name === "fancyBox")!;
+    expect(reg).toMatchObject({ line: 2, nameLine: 4, namePos: fn.namePos, signature: "directive fancyBox($uibModal)", fullSignature: "directive fancyBox($uibModal)\n['$uibModal']" });
+    expect(registrationOf(fn, all)).toBe(reg);
+    expect(registrationOf(all.find((d) => d.name === "makeStore")!, all)?.qualifiedName).toBe("store");
+    expect(all.find((d) => d.name === "store" && d.nameless)?.fullSignature).toBe("factory store($http)\n['$http']");
   });
 
   it("object-literal holders, prototype and static assignments, this-members", () => {

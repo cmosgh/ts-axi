@@ -320,6 +320,41 @@ function registeredFunction(arg: ts.Expression | undefined): FunctionNode | unde
   return asFunction(arg);
 }
 
+interface NamedFunction {
+  fn: ts.FunctionDeclaration | FunctionNode;
+  /** The function's own name identifier (the declaration name or the variable). */
+  name: ts.Identifier;
+  /** `name.$inject = [...]` in the same scope. */
+  inject?: ts.ArrayLiteralExpression;
+}
+
+/**
+ * A registration's callback given by identifier (`.directive('x', fancyBox)`, `['$a', fancyBox]`): the
+ * function declaration or function-valued variable of that name among the statements of the call's scope.
+ */
+function functionByIdentifier(call: ts.CallExpression, arg: ts.Expression | undefined): NamedFunction | undefined {
+  const ref = arg && ts.isArrayLiteralExpression(arg) ? arg.elements[arg.elements.length - 1] : arg;
+  if (!ref || !ts.isIdentifier(ref)) return undefined;
+  let scope: ts.Node = call;
+  while (!ts.isSourceFile(scope) && !(ts.isBlock(scope) && ts.isFunctionLike(scope.parent))) scope = scope.parent;
+  const statements = (scope as ts.SourceFile | ts.Block).statements;
+  let found: NamedFunction | undefined;
+  let inject: ts.ArrayLiteralExpression | undefined;
+  for (const st of statements) {
+    if (ts.isFunctionDeclaration(st) && st.name?.text === ref.text && st.body) found = { fn: st, name: st.name };
+    else if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        const fn = asFunction(d.initializer);
+        if (fn && ts.isIdentifier(d.name) && d.name.text === ref.text) found = { fn, name: d.name };
+      }
+    } else if (ts.isExpressionStatement(st) && ts.isBinaryExpression(st.expression) && ts.isPropertyAccessExpression(st.expression.left)) {
+      const { left, right } = st.expression;
+      if (left.name.text === "$inject" && ts.isIdentifier(left.expression) && left.expression.text === ref.text && ts.isArrayLiteralExpression(right)) inject = right;
+    }
+  }
+  return found && (inject ? { ...found, inject } : found);
+}
+
 function isStringName(node: ts.Node | undefined): node is ts.StringLiteral | ts.NoSubstitutionTemplateLiteral {
   return node !== undefined && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node));
 }
@@ -329,7 +364,7 @@ function compact(node: ts.Node, sf: ts.SourceFile): string {
 }
 
 /** Parameter list (and return type) of a function as `(a, b): T`. */
-function paramsText(fn: FunctionNode, sf: ts.SourceFile): string {
+function paramsText(fn: ts.SignatureDeclarationBase, sf: ts.SourceFile): string {
   const params = fn.parameters.map((p) => tokenText(p, sf, p.getStart(sf), p.end)).join(", ");
   return `(${params})${fn.type ? `: ${tokenText(fn.type, sf, fn.type.getStart(sf), fn.type.end)}` : ""}`;
 }
@@ -353,6 +388,8 @@ interface Raw {
   hasBody: boolean;
   nameless?: true;
   injected?: true;
+  /** Member found through a registration by identifier: it replaces the function's own members. */
+  registered?: true;
 }
 
 /**
@@ -364,6 +401,8 @@ interface Raw {
 export function collectDeclarations(sf: ts.SourceFile, file: string): Declaration[] {
   const raws: Raw[] = [];
   const local = localExportNames(sf);
+  /** Body spans of functions registered by identifier. */
+  const registeredBodies: Array<[number, number]> = [];
 
   const add = (
     node: ts.Node,
@@ -451,9 +490,13 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       bindingMembers(arg, name);
       return;
     }
-    const fn = registeredFunction(arg);
-    if (!fn) return;
-    const inject = arg && ts.isArrayLiteralExpression(arg) ? ` [${arg.elements.slice(0, -1).map((e) => e.getText(sf)).join(", ")}]` : "";
+    const inline = registeredFunction(arg);
+    // By identifier: namePos is the function's own name, which links the two Declarations (`registrationOf`).
+    const byName = inline ? undefined : functionByIdentifier(call, arg);
+    const fn = inline ?? byName?.fn;
+    if (!fn || !fn.body) return;
+    const injectList = arg && ts.isArrayLiteralExpression(arg) ? arg.elements.slice(0, -1) : (byName?.inject?.elements ?? []);
+    const inject = injectList.length > 0 || (arg && ts.isArrayLiteralExpression(arg)) ? ` [${injectList.map((e) => e.getText(sf)).join(", ")}]` : "";
     nested({
       start,
       end: arg!.end,
@@ -463,15 +506,20 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       parentName: verb,
       exported: true,
       signature: `${verb} ${name}${paramsText(fn, sf)}`,
-      namePos: (ts.isFunctionExpression(fn) && fn.name ? fn.name : fn).getStart(sf),
+      namePos: (byName ? byName.name : ts.isFunctionExpression(fn) && fn.name ? fn.name : fn).getStart(sf),
       nameless: true,
     });
     // The DI array is compared, not displayed: reordering injections is a contract change.
     if (inject) raws[raws.length - 1]!.signature += `\n${inject.trim()}`;
+    const from = raws.length;
     if (CONSTRUCTOR_VERBS.has(verb)) thisMembers(fn.body, name, true);
     if (verb === "factory" || verb === "service") returnedMembers(fn.body, name, true);
     if (verb === "directive") for (const obj of returnedObjects(fn.body)) bindingMembers(obj, name);
     if (verb === "config" || verb === "run") routerBody(fn.body);
+    if (byName) {
+      for (const r of raws.slice(from)) r.registered = true;
+      registeredBodies.push([fn.body.getStart(sf), fn.body.end]);
+    }
   };
 
   /** Object literals a function returns at its top level (a directive definition object). */
@@ -802,8 +850,11 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
   };
 
   visitStatements(sf.statements, undefined, true);
-  // Nested declarations are found after their holder statement; source order is start order.
-  const ordered = raws.map((r, i) => ({ r, i })).sort((a, b) => a.r.start - b.r.start || a.i - b.i);
+  // A registered function's members belong to its registered name; the generic pass (returned objects, `this.x`) is dropped.
+  const kept = registeredBodies.length === 0
+    ? raws
+    : raws.filter((r) => r.registered || !registeredBodies.some(([s, e]) => r.namePos >= s && r.namePos < e));
+  const ordered = kept.map((r, i) => ({ r, i })).sort((a, b) => a.r.start - b.r.start || a.i - b.i);
   return ordered.map(({ r }) => {
     const startLc = sf.getLineAndCharacterOfPosition(r.start);
     const full = r.signature;
@@ -826,6 +877,12 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       ...(r.injected ? { injected: true as const } : {}),
     };
   });
+}
+
+/** The string registration of a function registered by its identifier (`.directive('fancyBox', fancyBox)`): same namePos. */
+export function registrationOf(decl: Declaration, fileDecls: readonly Declaration[]): Declaration | undefined {
+  if (decl.nameless) return undefined;
+  return fileDecls.find((d) => d.nameless === true && d.namePos === decl.namePos && d.file === decl.file && d.kind === "function");
 }
 
 /** Declarations sharing file and qualified name (overloads, merging) are one Symbol. */

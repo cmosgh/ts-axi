@@ -659,6 +659,12 @@ describe("impact", () => {
       ]);
     });
 
+    it("a body edit of a function registered by identifier counts the registration's template usages", async () => {
+      const r = repo(LEGACY_FIXTURE);
+      r.edit("client/widgets.js", "$uibModal.open();", "$uibModal.open({});");
+      expect(changed(await impact(r))).toEqual([expect.objectContaining({ symbol: "fancyBox", change: "body", templates: 2 })]);
+    });
+
     it("a DI array or parameter change of a registration is a signature change", async () => {
       const r = repo(LEGACY_FIXTURE);
       r.edit("client/app.js", '["$scope", "priceService", function ($scope, priceService)', '["$scope", "taxService", function ($scope, priceService)');
@@ -899,6 +905,21 @@ describe("legacy JavaScript outline / def / refs", () => {
     expect(await rows("money")).toEqual(["client/templates/cart.html:4"]);
     expect(await rows("client/app.js:6")).toEqual(["client/templates/cart.html:1"]);
     expect(toon((await legacy("refs", "wapSelect.items")).stdout)).toMatchObject({ templates: "1 usages in 1 files" });
+  });
+
+  it("a function registered by identifier gets the registration's templates, note and --grep rows", async () => {
+    for (const target of ["client/widgets.js:6", "client/widgets.js:2", "fancyBox"]) {
+      const data = toon((await legacy("refs", target)).stdout);
+      expect(data, target).toMatchObject({ symbol: "fancyBox", declared_at: "client/widgets.js:6", templates: "2 usages in 1 files" });
+      expect(data["note"], target).toContain("registered by a string");
+    }
+    const grep = toon((await legacy("refs", "fancyBox", "--grep")).stdout)["unresolved"] as Payload[];
+    expect(grep.map((u) => `${u["file"]}:${u["line"]}`)).toEqual(["client/templates/panel.html:2", "client/templates/panel.html:3"]);
+    // DI array form, function named differently from the registration.
+    for (const target of ["client/widgets.js:16", "panelController", "PanelCtrl"]) {
+      expect(toon((await legacy("refs", target)).stdout), target).toMatchObject({ symbol: "PanelCtrl", templates: "1 usages in 1 files" });
+    }
+    expect(toon((await legacy("refs", "fancyBox.boxTitle")).stdout)).toMatchObject({ templates: "1 usages in 1 files" });
   });
 
   it("a binding on a multi-line tag counts past a quoted '>' in an earlier attribute", async () => {

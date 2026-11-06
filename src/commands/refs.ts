@@ -11,7 +11,7 @@ import { loadTemplates, templatesLine, templateTarget, templateUsages } from "..
 import { byDepthThenPath } from "../walk.js";
 import { detectWorkspace, isMultiProject } from "../workspace.js";
 import { isTestFile } from "../settings.js";
-import { isFunctionLike, kindFromScriptElement, parseTarget, type Declaration, type Kind } from "../symbols.js";
+import { isFunctionLike, kindFromScriptElement, parseTarget, registrationOf, type Declaration, type Kind } from "../symbols.js";
 import {
   contextOf,
   declarationAt,
@@ -211,9 +211,11 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   }
   const { semantic, scope } = built;
   const def = semantic.definitionAt(resolved.absFile, resolved.pos);
-  const decl =
+  const found =
     resolved.decl ??
     (def && def.line > 0 ? declarationAt(opened.index, def.absFile, def.pos, kindFromScriptElement(def.kind)) : undefined);
+  // A function registered by identifier is its registration: templates, note and textual use the registered name.
+  const decl = (found && registrationOf(found, opened.index.declarations(opened.index.abs(found.file)))) ?? found;
   const kind: Kind = decl?.kind ?? kindFromScriptElement(def?.kind ?? semantic.quickInfo(resolved.absFile, resolved.pos)?.kind ?? "");
   const symbol = decl?.qualifiedName ?? def?.name ?? label;
   const declaredAt = decl ? `${decl.file}:${decl.nameLine}` : def && def.line > 0 ? `${def.file}:${def.line}` : "(outside the Project)";

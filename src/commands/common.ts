@@ -326,7 +326,8 @@ export function resolvePosition(index: SyntacticIndex, cwd: string, target: Extr
     return hit ? pick(hit) : { kind: "none", abs, file, reason: `no identifier at ${file}:${target.line}:${target.col}` };
   }
   // A string-registered name has no identifier: its line stands for it.
-  const nameless = decls.find((d) => d.nameless && d.nameLine === target.line);
+  // The registration line too: `.directive('x', fancyBox)` has its name far from the function.
+  const nameless = decls.find((d) => d.nameless && d.nameLine === target.line) ?? decls.find((d) => d.nameless && d.line === target.line);
   if (nameless) return { kind: "decl", decl: nameless, abs };
   if (onLine.length === 0) return { kind: "none", abs, file, reason: `no identifier on ${file}:${target.line}` };
   const ambiguous = (ids: ReadonlyArray<ts.Identifier | ts.PrivateIdentifier>): PositionResolution => {
