@@ -41,8 +41,8 @@ input:
   (none) = working tree vs HEAD (staged + unstaged + untracked); --staged = index vs HEAD
   <git-range> = any git diff range (main...HEAD, abc123, v1..v2); - = unified diff on stdin (needs the after side checked out)
   analysis is of the current checkout - for a range whose head is not the working tree, check that head out first
-flags[8]:
-  --staged, --via (adds References through an interface or base member to refs[n] with a via column), --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), --fields <kind,exported,refs_total,via,files,tests|all> (extra changed[n] columns), -P <tsconfig>, --json
+flags[9]:
+  --staged, --size (adds size{files,hunks,lines_added,lines_removed,patch_chars,exported_signature_changes,removed_symbols} - hunks are counted at zero context for a git source, as given for -; untracked files count as added),--via (adds References through an interface or base member to refs[n] with a via column), --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), --fields <kind,exported,refs_total,via,files,tests|all> (extra changed[n] columns), -P <tsconfig>, --json
 output:
   base, head, changes (count), changed[n]{symbol,change,at,refs_outside} by default; --fields adds columns in place, --fields all gives {symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}
   change = signature | removed | type | added | body | modified (before unavailable) - riskiest first
@@ -57,10 +57,11 @@ output:
   skipped[n]{file,reason} = files in the diff that were not analysed (.astro, .json, outside the Project)
   tests: 0 on an exported signature or body change = no Test file references it (columns from --fields exported,tests)
   scope = in a monorepo without -P the program is the touched files + two levels of importers (scope_partial: true when capped)
-examples[5]:
+examples[6]:
   ts-axi impact
   ts-axi impact --staged
   ts-axi impact main...HEAD
+  ts-axi impact main...HEAD --size
   ts-axi impact HEAD~3 --depth 2 --grep
   bb-axi pr diff 42 --raw | ts-axi impact -
 `;
@@ -73,6 +74,7 @@ const SPECS = [
   { name: "--grep", boolean: true },
   { name: "--test-glob", repeatable: true },
   { name: "--fields" },
+  { name: "--size", boolean: true },
   { name: "-P" },
 ];
 
@@ -90,6 +92,26 @@ interface Input {
   noText: string[];
   /** Files from a stdin diff that are not in the working tree. */
   missing: string[];
+  size: DiffSize;
+}
+
+/** `--size`: counts from the parsed diff; for a git source the hunks are at zero context (impact diffs with -U0). */
+interface DiffSize {
+  files: number;
+  hunks: number;
+  lines_added: number;
+  lines_removed: number;
+  patch_chars: number;
+}
+
+function diffSize(parsed: readonly FileDiff[], text: string): DiffSize {
+  return {
+    files: parsed.length,
+    hunks: parsed.reduce((n, f) => n + f.hunks.length, 0),
+    lines_added: parsed.reduce((n, f) => n + f.hunks.reduce((m, h) => m + h.added.length, 0), 0),
+    lines_removed: parsed.reduce((n, f) => n + f.hunks.reduce((m, h) => m + h.removed.length, 0), 0),
+    patch_chars: text.length,
+  };
 }
 
 export async function readStdin(command = "impact", example = "git diff -U0 | ts-axi impact -"): Promise<string> {
@@ -110,7 +132,6 @@ function readText(abs: string): string | null {
   }
 }
 
-
 async function gitInput(cwd: string, root: string, range: string | undefined, staged: boolean): Promise<Input> {
   if (!(await isGitRepo(cwd))) {
     throw new AxiError("not a git repository - impact needs git or a diff on stdin", "GIT_ERROR", [
@@ -119,6 +140,7 @@ async function gitInput(cwd: string, root: string, range: string | undefined, st
   }
   const [diffText, names] = await Promise.all([diffUnified(cwd, range, staged), diffNameStatus(cwd, range, staged)]);
   const parsed = parseUnifiedDiff(diffText);
+  const size = diffSize(parsed, diffText);
   const base = staged ? "HEAD" : await resolveBaseRev(cwd, range);
   const headRev = staged ? "" : range !== undefined ? headRevOfRange(range) : undefined;
   const files: FileInput[] = [];
@@ -135,16 +157,23 @@ async function gitInput(cwd: string, root: string, range: string | undefined, st
       if (text === null) continue;
       const lines = text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
       files.push({ path, status: "added", after: lines > 0 ? [[1, lines]] : [], before: [], afterText: text, beforeText: null });
+      // Untracked files count as added, one hunk each; they are not in patch_chars.
+      size.files++;
+      size.hunks += lines > 0 ? 1 : 0;
+      size.lines_added += lines;
     }
   }
   const seen = new Set(parsed.map((d) => d.path));
+  const noText = names.filter((n) => !seen.has(n.path) && n.status !== "deleted").map((n) => n.path);
+  size.files += noText.length;
   return {
     base,
     head: staged ? "index" : headRev ?? "working tree",
     ...(headRev !== undefined ? { headRev } : {}),
     files,
-    noText: names.filter((n) => !seen.has(n.path) && n.status !== "deleted").map((n) => n.path),
+    noText,
     missing: [],
+    size,
   };
 }
 
@@ -162,7 +191,7 @@ function stdinInput(text: string, root: string): Input {
     const beforeText = diff.status === "added" ? null : reverseApply(afterText ?? "", diff.hunks) ?? undefined;
     files.push({ path: diff.path, ...(diff.oldPath ? { oldPath: diff.oldPath } : {}), status: diff.status, after, before, afterText, beforeText });
   }
-  return { base: "stdin diff", head: "working tree", files, noText: [], missing };
+  return { base: "stdin diff", head: "working tree", files, noText: [], missing, size: diffSize(parseUnifiedDiff(text, { binary: true }), text) };
 }
 
 function isSourcePath(path: string): boolean {
@@ -639,12 +668,22 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
     }
   }
   const total = declChanges.length + fileLevel.length;
+  const exportedOf = (c: DeclChange): boolean => (c.after ?? c.before)?.exported ?? false;
   const header = {
     ...(warnings.length > 0 ? { warning: warnings.join("; ") } : {}),
     ...projectFields(opened),
     base: input.base,
     head: input.head,
     changes: total,
+    ...(bool(parsed, "--size")
+      ? {
+          size: {
+            ...input.size,
+            exported_signature_changes: declChanges.filter((c) => c.change === "signature" && exportedOf(c)).length,
+            removed_symbols: declChanges.filter((c) => c.change === "removed").length,
+          },
+        }
+      : {}),
   };
   const skipTemplates = (used: Set<string>): void => {
     for (const f of templateInputs) if (!used.has(f.path)) skipped.push({ file: f.path, reason: "not TS or JS source" });

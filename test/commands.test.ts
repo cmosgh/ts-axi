@@ -510,6 +510,24 @@ describe("impact", () => {
     rmSync(bare, { recursive: true, force: true });
   });
 
+  it("--size counts files, zero-context hunks, lines and risky changes from the same diff", async () => {
+    const r = repo();
+    r.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    r.write("src/extra.ts", "export const extra = 1;\nexport const more = 2;\n");
+    const patch = r.git("diff", "-U0", "--no-color", "--no-ext-diff", "-M", "HEAD", "--");
+    const data = await impact(r, "--size");
+    expect(data["size"]).toEqual({ files: 2, hunks: 2, lines_added: 3, lines_removed: 1, patch_chars: patch.length, exported_signature_changes: 1, removed_symbols: 0 });
+    expect(toon((await r.run("impact")).stdout)).not.toHaveProperty("size");
+    const ranged = repo();
+    ranged.git("checkout", "-q", "-b", "feature");
+    ranged.edit("src/services/parse.ts", "parse(raw: string)", "parse(raw: string, radix = 10)");
+    ranged.git("commit", "-q", "-am", "change");
+    const diff = ranged.git("diff", "-U3", "main...feature");
+    let stdout = "";
+    await main({ argv: ["impact", "-", "--size"], cwd: ranged.dir, stdin: diff, stdout: { write: (c: string) => (stdout += c) } });
+    expect(toon(stdout)["size"]).toMatchObject({ files: 1, hunks: 1, lines_added: 1, lines_removed: 1, patch_chars: diff.length });
+  });
+
   it("analyses a branch range main...<branch> and names its head", async () => {
     const r = repo();
     r.git("checkout", "-q", "-b", "feature");
