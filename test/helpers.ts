@@ -15,6 +15,8 @@ export const COMMONJS_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "f
 export const ESM_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "esm-js");
 /** The synthetic Nx + pnpm workspace, read-only. */
 export const WORKSPACE_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "workspace");
+/** A service, a same-named sibling, a consumer and a spec using mock mapped types (`DeepMocked`, `Mocked`, `MockProxy`, `Partial`, `Pick`). */
+export const MOCKS_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "mocks");
 
 /**
  * A temp copy of the fixture as its own repo root, so paths print as

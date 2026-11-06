@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { decode } from "@toon-format/toon";
 import { beforeAll, describe, expect, it } from "vitest";
 import { main } from "../src/cli.js";
-import { COMMONJS_FIXTURE, ESM_FIXTURE, FIXTURE, fixtureCopy, LEGACY_FIXTURE, runner, WORKSPACE_FIXTURE, type RunResult } from "./helpers.js";
+import { committed, COMMONJS_FIXTURE, ESM_FIXTURE, FIXTURE, fixtureCopy, LEGACY_FIXTURE, MOCKS_FIXTURE, runner, WORKSPACE_FIXTURE, type RunResult } from "./helpers.js";
 
 type Payload = Record<string, unknown>;
 
@@ -1318,5 +1318,37 @@ describe("anchor", () => {
     }
     const swapped = toon((await r.run("anchor", "src/ledger.ts:5", "main...feature")).stdout);
     expect(swapped["help"]).toEqual(["the diff source goes first: `ts-axi anchor main...feature src/ledger.ts:5`"]);
+  });
+});
+
+describe("References through mock mapped types", () => {
+  const MOCK_LINES = [6, 7, 8, 12, 13, 14, 15];
+  const specLines = (rows: Payload[]): number[] =>
+    rows.filter((r) => String(r["file"]).endsWith(".spec.ts")).map((r) => Number(r["line"]));
+
+  it("refs counts every mock shape and keeps a same-named sibling out", async () => {
+    const run = runner(fixtureCopy({ fixture: MOCKS_FIXTURE }));
+    const data = toon((await run("refs", "ItemService.findItem")).stdout);
+    expect(data).toMatchObject({ refs_total: 8, files: 2, tests: 1 });
+    const rows = data["refs"] as Payload[];
+    expect(specLines(rows)).toEqual(MOCK_LINES);
+    // OtherService.findItem: the consumer's line 11 and the spec's line 19.
+    expect(rows.some((r) => r["line"] === 11 || r["line"] === 19)).toBe(false);
+  });
+
+  it("callers lists the mock uses with the test function", async () => {
+    const run = runner(fixtureCopy({ fixture: MOCKS_FIXTURE }));
+    const rows = toon((await run("callers", "ItemService.findItem")).stdout)["refs"] as Payload[];
+    expect(specLines(rows)).toEqual(MOCK_LINES);
+    expect(rows.find((r) => r["line"] === 6)?.["caller"]).toBe("deepMocked");
+  });
+
+  it("impact counts mocking specs as tests of a signature change", async () => {
+    const dir = committed(MOCKS_FIXTURE);
+    const file = join(dir, "src/items/item.service.ts");
+    writeFileSync(file, readFileSync(file, "utf8").replace("async findItem(id: number): Promise<string> {\n    return `item", "async findItem(id: number, fresh = false): Promise<string> {\n    return `item"));
+    const data = toon((await runner(dir)("impact", "--fields", "all")).stdout);
+    const row = (data["changed"] as Payload[]).find((r) => r["symbol"] === "ItemService.findItem");
+    expect(row).toMatchObject({ change: "signature", refs_outside: 8, files: 2, tests: 1 });
   });
 });

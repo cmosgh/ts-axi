@@ -75,11 +75,11 @@ The fixture files are 5 to 40 lines long, so a ±40-line read is the whole file:
 | task | ts-axi tokens | grep tokens | ratio | recall |
 | --- | ---: | ---: | ---: | --- |
 | def of a service method | 496 | 1256 | 0.40 | 1/1 |
-| callers of a service method (17 call sites) | 873 | 54314 | 0.02 | 17/96 |
-| refs of a service method with a common name | 715 | 147944 | 0.01 | 18/77 (244 hits are other declarations of the name) |
-| impact of a two-commit fix (4 changed symbols) | 1395 | 23950 | 0.06 | 28/44 (5 in the diff) |
+| callers of a service method (96 call sites) | 6587 | 54314 | 0.12 | 96/96 |
+| refs of a service method with a common name | 4653 | 147944 | 0.03 | 77/77 (244 more hits are other declarations of the name) |
+| impact of a two-commit fix (4 changed symbols) | 2255 | 23948 | 0.09 | 44/44 (5 in the diff) |
 
-Every hit those three rows miss is a member access through a deep-mock mapped type (`DeepMocked<Service>`) in a test file: the checker resolves it to the method, `findReferences` does not return it, and nothing reports it as a blind spot yet.
+The ts-axi side follows the `--limit` hint when a list is cut at 50 rows, as an agent would. Most rows past the first 50 are member accesses through a deep-mock mapped type (`DeepMocked<Service>`) in test files: `findReferences` returns them as extra groups defined at the method itself, and they count as References (before 0.1.15 they were dropped, and recall was 17/96 and 18/77).
 
 ## Install
 

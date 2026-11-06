@@ -105,11 +105,12 @@ async function axiWorkflow(cli: string, dir: string, task: Task): Promise<{ outp
   return { outputs, commands };
 }
 
-/** refs/callers: the `--grep` hint for textual matches; impact: `refs` on the riskiest row. */
+/** refs/callers: the `--limit` hint of a cut list, else `--grep` for textual matches; impact: `refs` on the riskiest row. */
 function followedHint(kind: TaskKind, stdout: string): string[] | undefined {
-  const hints = [...stdout.matchAll(/Run `ts-axi ([^`]+)`/g)].map((m) => m[1]!);
+  const hints = [...stdout.matchAll(/[Rr]un `ts-axi ([^`]+)`/g)].map((m) => m[1]!);
+  const cut = /^truncated: true$/m.test(stdout) ? hints.find((h) => / --limit \d+/.test(h)) : undefined;
   const pick =
-    kind === "impact" ? hints.find((h) => h.startsWith("refs ")) : kind === "def" ? undefined : hints.find((h) => / --grep\b/.test(h));
+    kind === "impact" ? hints.find((h) => h.startsWith("refs ")) : kind === "def" ? undefined : cut ?? hints.find((h) => / --grep\b/.test(h));
   return pick?.split(" ");
 }
 
