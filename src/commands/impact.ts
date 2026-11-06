@@ -330,7 +330,9 @@ export function textualMatches(
   changeSet: Map<string, Range[]>,
   localTo: Map<string, string> = new Map(),
 ): Unresolved[] {
-  const files = [...semantic.projectFiles];
+  // The whole Project, like `textualCount`: a subgraph program misses DI uses, which import nothing.
+  const byRel = new Map([...semantic.projectFiles, ...opened.index.files].map((f) => [opened.index.rel(f), f] as const));
+  const files = [...byRel.values()];
   const projectSet = new Set(files);
   walkExtra(opened.root, files);
   sourceFs().prefetch(files);
