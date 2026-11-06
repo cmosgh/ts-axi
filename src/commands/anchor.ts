@@ -26,9 +26,9 @@ flags[5]:
   --side new|old (default new; old = lines of the before file - comments on removed lines), --context <0-${MAX_CONTEXT}> (git sources only; default ${DEFAULT_CONTEXT} like Bitbucket and GitHub), --staged, --fields <in_diff,in_file,nearest,change,other_line|all>, --json
 output:
   base, head, side, anchors[n]{anchor,ok,reason,symbol}, invalid (count)
-  reason = - when ok; else not in diff - nearest <file:a-b> | past end of file (<n> lines) | removed line - use --side old | crosses hunk boundary - hunk <file:a-b> | file not in diff | binary
+  reason = - when ok; else not in diff - nearest <a-b> | past end of file (<n> lines) | removed line - use --side old | crosses hunk boundary - hunk <a-b> | file not in diff | binary
   symbol = qualifiedName#kind of the innermost Declaration holding the line (a stable key for a finding); file_level outside any; - for non-TS/JS files
-  in_diff = the line is shown in a hunk; in_file = within the line count of that side; nearest = closest hunk on that side
+  in_diff = the line is shown in a hunk; in_file = within the line count of that side; nearest = lines of the closest hunk on that side
   change = impact class of that Symbol in this diff (signature, body, added, ...) or -; other_line = the same line on the other side (context lines) or -
 exit codes:
   0 every anchor ok; 3 ANCHOR_INVALID = at least one is not (the full output still prints); 2 usage; 1 git
@@ -199,7 +199,7 @@ export async function anchorCommand(args: string[], ctx: CommandContext): Promis
     let symbol = "-";
     let change = "-";
     const sidePath = file ? (side === "old" ? (file.oldPath ?? file.path) : file.path) : anchor.path;
-    if (file && typeof sideText === "string" && isSourcePath(sidePath)) {
+    if (file && typeof sideText === "string" && verdict.inFile !== false && isSourcePath(sidePath)) {
       const list = declsOf(sidePath, sideText, `${side}:${sidePath}`);
       const decl = enclosing(list, anchor.start, anchor.end);
       symbol = decl ? matchKey(decl) : "file_level";
@@ -220,7 +220,7 @@ export async function anchorCommand(args: string[], ctx: CommandContext): Promis
   for (const r of invalid.slice(0, 3)) {
     if (r.verdict.reason.startsWith("removed line")) help.push(`Run \`${again(`${r.anchor.raw} --side old`)}\` - ${r.anchor.raw} is a removed line`);
     else if (r.verdict.reason.startsWith("added line")) help.push(`Run \`${again(r.anchor.raw)}\` - ${r.anchor.raw} is an added line on the new side`);
-    else if (r.verdict.nearest) help.push(`Move ${r.anchor.raw} into ${r.verdict.nearest} or post it as a general comment`);
+    else if (r.verdict.nearest) help.push(`Move ${r.anchor.raw} into ${r.anchor.path}:${r.verdict.nearest} or post it as a general comment`);
   }
   if (invalid.length > 0) {
     help.push(`exit 3 (ANCHOR_INVALID) - ${invalid.length} of ${rows.length} anchors cannot be commented; fix or drop them before posting`);

@@ -1205,7 +1205,7 @@ describe("anchor", () => {
     expect(rowsOf(stdout)).toEqual([
       { anchor: "src/ledger.ts:5", ok: true, reason: "-", symbol: "Ledger.add#method" },
       { anchor: "src/ledger.ts:3", ok: true, reason: "-", symbol: "Ledger#class" },
-      { anchor: "src/ledger.ts:15", ok: false, reason: "not in diff - nearest src/ledger.ts:2-8", symbol: "Ledger.sum#method" },
+      { anchor: "src/ledger.ts:15", ok: false, reason: "not in diff - nearest 2-8", symbol: "Ledger.sum#method" },
       { anchor: "src/ledger.ts:30-32", ok: true, reason: "-", symbol: "Ledger.clear#method" },
       { anchor: "src/other.ts:1", ok: false, reason: "file not in diff", symbol: "-" },
     ]);
@@ -1228,7 +1228,7 @@ describe("anchor", () => {
 
   it("--context 0 shrinks the hunks to the changed lines", async () => {
     const rows = rowsOf((await r.run("anchor", "main...feature", "src/ledger.ts:5", "src/ledger.ts:4", "--context", "0")).stdout);
-    expect(rows.map((x) => [x.ok, x.reason])).toEqual([[true, "-"], [false, "not in diff - nearest src/ledger.ts:5"]]);
+    expect(rows.map((x) => [x.ok, x.reason])).toEqual([[true, "-"], [false, "not in diff - nearest 5"]]);
   });
 
   it("renamed, added, deleted, binary and non-ASCII (quoted) files", async () => {
@@ -1269,7 +1269,7 @@ describe("anchor", () => {
     expect(data).not.toHaveProperty("context");
     expect(data["anchors"]).toEqual([
       { anchor: "src/ledger.ts:5", ok: true, reason: "-", symbol: "Ledger.add#method" },
-      { anchor: "src/ledger.ts:14", ok: false, reason: "not in diff - nearest src/ledger.ts:2-8", symbol: "Ledger.sum#method" },
+      { anchor: "src/ledger.ts:14", ok: false, reason: "not in diff - nearest 2-8", symbol: "Ledger.sum#method" },
     ]);
   });
 

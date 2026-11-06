@@ -420,12 +420,12 @@ describe("anchor judgement", () => {
   });
 
   it("names the closer hunk for a line between two hunks", () => {
-    expect(judge(at("src/q.ts:10"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "not in diff - nearest src/q.ts:2-8", nearest: "src/q.ts:2-8" });
-    expect(judge(at("src/q.ts:17"), twoHunks, "new", 40)).toMatchObject({ reason: "not in diff - nearest src/q.ts:20-26" });
+    expect(judge(at("src/q.ts:10"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "not in diff - nearest 2-8", nearest: "2-8" });
+    expect(judge(at("src/q.ts:17"), twoHunks, "new", 40)).toMatchObject({ reason: "not in diff - nearest 20-26" });
   });
 
   it("rejects a range that leaves its hunk, a line past the end and a removed line on the new side", () => {
-    expect(judge(at("src/q.ts:7-10"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "crosses hunk boundary - hunk src/q.ts:2-8", inDiff: false });
+    expect(judge(at("src/q.ts:7-10"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "crosses hunk boundary - hunk 2-8", inDiff: false });
     expect(judge(at("src/q.ts:45"), twoHunks, "new", 40)).toMatchObject({ ok: false, reason: "past end of file (40 lines)", inFile: false });
     const removed = parseUnifiedDiff(["--- a/r.ts", "+++ b/r.ts", "@@ -30,2 +29,0 @@", "-x", "-y"].join("\n"))[0]!;
     expect(judge(at("r.ts:30"), removed, "new", 50)).toMatchObject({ ok: false, reason: "removed line - use --side old" });

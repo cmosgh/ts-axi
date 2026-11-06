@@ -164,7 +164,7 @@ head: working tree
 side: new
 anchors[2]{anchor,ok,reason,symbol}:
   "src/a.ts:12",true,"-",Cart.total#method
-  "src/b.ts:40-44",false,"not in diff - nearest src/b.ts:51-58",formatPrice#function
+  "src/b.ts:40-44",false,not in diff - nearest 51-58,formatPrice#function
 invalid: 1
 help[3]:
   - "Move src/b.ts:40-44 into src/b.ts:51-58 or post it as a general comment"

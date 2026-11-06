@@ -70,8 +70,8 @@ export function lineCount(text: string): number {
   return text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
 }
 
-export function formatSpan(path: string, [a, b]: Range): string {
-  return a === b ? `${path}:${a}` : `${path}:${a}-${b}`;
+export function formatSpan([a, b]: Range): string {
+  return a === b ? String(a) : `${a}-${b}`;
 }
 
 /** The closest range to [start, end]; ties go to the earlier one. */
@@ -94,6 +94,7 @@ export interface Verdict {
   inDiff: boolean;
   /** undefined = the file text on that side is not available. */
   inFile: boolean | undefined;
+  /** Lines of the closest hunk on that side (`114-120`), same file as the anchor. */
   nearest?: string;
   /** Line on the other side for a context line. */
   otherLine?: number;
@@ -106,7 +107,6 @@ export interface Verdict {
 export function judge(anchor: Anchor, file: FileDiff | undefined, side: Side, lines: number | undefined): Verdict {
   if (!file) return { ok: false, reason: "file not in diff", inDiff: false, inFile: undefined };
   if (file.binary) return { ok: false, reason: "binary", inDiff: false, inFile: undefined };
-  const shownPath = side === "old" ? (file.oldPath ?? file.path) : file.path;
   const inFile = lines === undefined ? undefined : anchor.end <= lines;
   if (side === "old" && file.status === "added") return { ok: false, reason: "file added - use --side new", inDiff: false, inFile: false };
 
@@ -122,7 +122,7 @@ export function judge(anchor: Anchor, file: FileDiff | undefined, side: Side, li
     return { ok: inFile !== false, reason: inFile === false ? `past end of file (${lines} lines)` : "-", inDiff: true, inFile, ...(first.other !== undefined ? { otherLine: first.other } : {}) };
   }
   if (first) {
-    const nearest = formatSpan(shownPath, map.hunks.get(first.hunk)!);
+    const nearest = formatSpan(map.hunks.get(first.hunk)!);
     return { ok: false, reason: `crosses hunk boundary - hunk ${nearest}`, inDiff: false, inFile, nearest };
   }
 
@@ -133,7 +133,7 @@ export function judge(anchor: Anchor, file: FileDiff | undefined, side: Side, li
   if (inFile === false) return { ok: false, reason: `past end of file (${lines} lines)`, inDiff: false, inFile };
   const near = nearestRange([...map.hunks.values()], anchor.start, anchor.end);
   if (!near) return { ok: false, reason: `not in diff - no ${side}-side lines in this file`, inDiff: false, inFile };
-  const nearest = formatSpan(shownPath, near);
+  const nearest = formatSpan(near);
   return { ok: false, reason: `not in diff - nearest ${nearest}`, inDiff: false, inFile, nearest };
 }
 
