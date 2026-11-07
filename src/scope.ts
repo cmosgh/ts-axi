@@ -127,7 +127,20 @@ export function semanticFor(
   hops: number,
   extra: readonly string[] = [],
 ): { semantic: SemanticProject; scope?: ScopeInfo } {
-  if (!ctx.index.project.scope) return { semantic: createSemanticProject(ctx.index) };
+  if (!ctx.index.project.scope) {
+    // A seed the tsconfig leaves out (an excluded dir) joins the Project's roots, or the service cannot see it.
+    const known = new Set(ctx.index.files);
+    const outside = seeds.filter((s) => !known.has(s) && sourceFs().exists(s));
+    if (outside.length === 0) return { semantic: createSemanticProject(ctx.index) };
+    const { project } = ctx.index;
+    return {
+      semantic: createSemanticProject(ctx.index, {
+        rootNames: [...project.fileNames, ...new Set(outside)],
+        options: project.options,
+        currentDirectory: project.tsconfig ? dirname(project.tsconfig) : ctx.index.root,
+      }),
+    };
+  }
   const { program, info } = planScope(ctx.index, seeds, hops, extra);
   return { semantic: createSemanticProject(ctx.index, program), scope: info };
 }

@@ -17,6 +17,8 @@ export const ESM_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtur
 export const WORKSPACE_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "workspace");
 /** A service, a same-named sibling, a consumer and a spec using mock mapped types (`DeepMocked`, `Mocked`, `MockProxy`, `Partial`, `Pick`). */
 export const MOCKS_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "mocks");
+/** A tsconfig that excludes `edge/` (a Deno function with its own deno.json) and components with function-local Declarations. */
+export const EXCLUDED_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "excluded");
 
 /**
  * A temp copy of the fixture as its own repo root, so paths print as

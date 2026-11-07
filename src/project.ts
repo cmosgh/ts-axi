@@ -143,7 +143,7 @@ export function discoverTsconfig(startDir: string, options: DiscoverOptions = {}
   }
 }
 
-function isSourceFile(name: string): boolean {
+export function isSourceFile(name: string): boolean {
   return SOURCE_EXTENSIONS.some((ext) => name.endsWith(ext)) && !/\.d\.[mc]?ts$/.test(name);
 }
 
@@ -297,7 +297,7 @@ export function relPath(root: string, abs: string): string {
   return relative(root, abs).split(sep).join("/");
 }
 
-function declMatches(decl: Declaration, query: NameQuery): boolean {
+export function declMatches(decl: Declaration, query: NameQuery): boolean {
   const needle = query.fuzzy ? query.name.toLowerCase() : query.name;
   if (query.member !== undefined) {
     if (decl.parentName === undefined) return false;

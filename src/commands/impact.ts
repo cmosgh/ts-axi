@@ -29,6 +29,7 @@ import { IMPACT_HOPS, scopeFields, scopeHelp, semanticFor } from "../scope.js";
 import { isTemplatePath, loadTemplates, templateTarget, templateUsages, usagesIn, type TemplateFile, type TemplateTarget } from "../templates.js";
 import { walkFiles } from "../walk.js";
 import { contextOf, lineOf, open, projectFields, type Opened } from "./common.js";
+import { outsideFiles } from "./miss.js";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
@@ -357,11 +358,15 @@ export function textualMatches(
   return rows.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
-/** Whole-word matches of `name` in the Project files, one row per line: the fallback when no Declaration matches. */
+/**
+ * Whole-word matches of `name` in the Project files and the source files it leaves out, one row per line:
+ * the fallback when no Declaration matches.
+ */
 export function textualScan(opened: Opened, name: string): Unresolved[] {
   const rows: Unresolved[] = [];
-  sourceFs().prefetch(opened.index.files);
-  for (const abs of opened.index.files) {
+  const files = [...opened.index.files, ...outsideFiles(opened)];
+  sourceFs().prefetch(files);
+  for (const abs of files) {
     const text = opened.index.text(abs);
     if (text === undefined || !text.includes(name)) continue;
     let last = 0;
@@ -374,8 +379,8 @@ export function textualScan(opened: Opened, name: string): Unresolved[] {
   return rows.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
-export function textualScanHint(label: string, matches: number): string {
-  return `Run \`ts-axi refs ${label} --grep\` for ${matches} textual matches`;
+export function textualScanHint(label: string, matches: number, outside = 0): string {
+  return `Run \`ts-axi refs ${label} --grep\` for ${matches} textual matches${outside > 0 ? ` (${outside} in files outside the Project)` : ""}`;
 }
 
 /** Whether a whole-word count of the name says anything: not for router-called or by-name-injected members (`injected`). */

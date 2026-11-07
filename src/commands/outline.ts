@@ -4,7 +4,8 @@ import { bool, flag, parseArgs, parseFields } from "../args.js";
 import type { CommandContext } from "../context.js";
 import { usageError } from "../errors.js";
 import { hasGlobMagic, matchesGlob } from "../glob.js";
-import { createSyntacticIndex, findRepoRoot, openProject, SOURCE_EXTENSIONS } from "../project.js";
+import { createSyntacticIndex, findRepoRoot, isSourceFile, openProject, SOURCE_EXTENSIONS } from "../project.js";
+import { listFiles } from "../walk.js";
 import { block, helpBlock, out } from "../render.js";
 import type { Declaration } from "../symbols.js";
 import { useRef } from "./common.js";
@@ -67,11 +68,17 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
   const index = globs.length > 0
     ? openProject(ctx.cwd, override ? { override } : {}).index
     : createSyntacticIndex(root, { root, tsconfig: null, implicit: true, fileNames: files, options: {} });
+  let outsideCount = 0;
   if (globs.length > 0) {
     const rooted = globs.map((g) => (cwdPrefix && !cwdPrefix.startsWith("..") ? posix.join(cwdPrefix, g.replace(/^\.\//, "")) : g));
-    for (const file of index.files) if (rooted.some((g) => matchesGlob(index.rel(file), g))) files.push(file);
+    const matching = (list: readonly string[]): string[] => list.filter((file) => rooted.some((g) => matchesGlob(index.rel(file), g)));
+    const inProject = matching(index.files);
+    // Files the tsconfig leaves out parse alone, like a plain path.
+    const outside = inProject.length === 0 && files.length === 0 ? matching(listFiles(root, isSourceFile, { maxFiles: 20_000, deadline: Date.now() + 600 }).files) : [];
+    outsideCount = outside.length;
+    files.push(...inProject, ...outside);
     if (files.length === 0) {
-      return out(block({ files: 0, decls: 0 }), helpBlock([`No Project file matches ${globs.join(" ")}; paths are relative to the current directory`]));
+      return out(block({ files: 0, decls: 0 }), helpBlock([`No source file matches ${globs.join(" ")}; paths are relative to the current directory`]));
     }
   }
   const unique = [...new Set(files)];
@@ -107,6 +114,7 @@ export async function outlineCommand(args: string[], ctx: CommandContext): Promi
       ...(single ? { file: index.rel(unique[0]!) } : { files: unique.length }),
       decls: rows.length === 0 ? 0 : rows,
       ...(decls.length > MAX_ROWS ? { truncated: true, decls_total: decls.length } : {}),
+      ...(outsideCount > 0 ? { note: `${outsideCount} files outside the Project` } : {}),
     }),
     helpBlock(help),
   );
