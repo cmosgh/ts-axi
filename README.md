@@ -81,6 +81,19 @@ The fixture files are 5 to 40 lines long, so a ±40-line read is the whole file:
 
 The ts-axi side follows the `--limit` hint when a list is cut at 50 rows, as an agent would. Most rows past the first 50 are member accesses through a deep-mock mapped type (`DeepMocked<Service>`) in test files: `findReferences` returns them as extra groups defined at the method itself, and they count as References (before 0.1.15 they were dropped, and recall was 17/96 and 18/77).
 
+### Speed
+
+The same runs count tool calls (each ts-axi command, `git grep`, `git diff` and file read is one call) and time the commands. An agent's task time is mostly model round-trips, so the estimate adds an **assumed** 3 s per call to the measured command time (`TURN_MS` in `test/compare.ts`). On the Nx monorepo:
+
+| task | ts-axi calls | grep calls | ts-axi command time | grep command time | est. task time ts-axi | est. task time grep |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| def of a service method | 1 | 3 | 1.4 s | 0.94 s | 4.4 s | 9.9 s |
+| callers of a service method | 2 | 28 | 11.1 s | 0.20 s | 17.1 s | 84.2 s |
+| refs of a service method with a common name | 2 | 100 | 6.3 s | 0.27 s | 12.3 s | 300.3 s |
+| impact of a two-commit fix | 2 | 19 | 8.1 s | 0.22 s | 14.1 s | 57.2 s |
+
+Each ts-axi command is slower than a `git grep` (every call starts cold and builds a program: 3-6 s per semantic call here), but it replaces dozens of reads. The integration test checks that ts-axi never needs more tool calls than the grep workflow; times are printed, not asserted.
+
 ## Install
 
 Requires Node.js 20+.

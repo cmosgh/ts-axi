@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { compareTask, recallLabel, recallOf, reportTable, type Task, type TaskResult } from "../compare.js";
+import { compareTask, recallLabel, recallOf, reportTable, speedTable, TURN_MS, type Task, type TaskResult } from "../compare.js";
 import { LEGACY_FIXTURE } from "../helpers.js";
 import { CLI, prepareFixture, prepareSample, type Sample } from "./helpers.js";
 
@@ -84,8 +84,9 @@ afterAll(() => {
   const commands = rows
     .map(({ result: r }) => `${r.task.name}\n  ts-axi: ${r.axiCommands.join(" ; ")}\n  grep:   ${r.grepCommands.join(" ; ")}`)
     .join("\n");
-  writeFileSync(REPORT, `${reportTable(rows)}\n${notes}\n\n${commands}\n`);
-  process.stdout.write(`\n${reportTable(rows)}\n${notes}\n\n${commands}\n(written to ${REPORT})\n`);
+  const speed = `${speedTable(rows)}\nEstimated task time = command time + ${TURN_MS / 1000} s per tool call (an assumed model round-trip).\n`;
+  writeFileSync(REPORT, `${reportTable(rows)}\n${notes}\n\n${speed}\n${commands}\n`);
+  process.stdout.write(`\n${reportTable(rows)}\n${notes}\n\n${speed}\n${commands}\n(written to ${REPORT})\n`);
   if (!UPDATE || rows.length !== CASES.length) return;
   writeFileSync(BASELINE, `${JSON.stringify(Object.fromEntries(rows.map((r) => [r.result.task.name, r.result.ratio])), null, 2)}\n`);
   // The README table is this report, never edited by hand.
@@ -118,6 +119,8 @@ describe("token cost against grep and read", () => {
       expect(recall.hits, "the grep workflow found nothing to compare").toBeGreaterThan(0);
       expect(recall.missing, `ts-axi misses grep hits (${recallLabel(recall)})`).toEqual([]);
       if (!c.overRatio) expect(ratio, `${result.axiTokens} vs ${result.grepTokens} tokens`).toBeLessThanOrEqual(MAX_RATIO);
+      // Times are too noisy to gate; tool calls are exact.
+      expect(result.axiCommands.length, result.grepCommands.join(" ; ")).toBeLessThanOrEqual(result.grepCommands.length);
       if (UPDATE) return;
       const pinned = baseline[c.name];
       expect(pinned, `no baseline for '${c.name}' - run with TOKEN_BUDGET_UPDATE=1`).toBeDefined();

@@ -48,6 +48,17 @@ export interface TaskResult {
   /** The commands each workflow ran, for the report. */
   axiCommands: string[];
   grepCommands: string[];
+  /** Wall-clock time of each workflow's commands (CLI runs, git, file reads), ms. */
+  axiMs: number;
+  grepMs: number;
+}
+
+/** Assumed model round-trip per tool call, for the estimated task time (an assumption, not measured). */
+export const TURN_MS = 3000;
+
+/** Command time plus one model round-trip per tool call. */
+export function taskMs(commandMs: number, calls: number): number {
+  return commandMs + calls * TURN_MS;
 }
 
 const READ_CONTEXT = 40;
@@ -367,8 +378,12 @@ function isCodeHit(hit: Hit, task: Task): boolean {
 // ---------------------------------------------------------------- one task
 
 export async function compareTask(cli: string, dir: string, task: Task): Promise<TaskResult> {
+  let started = performance.now();
   const axi = await axiWorkflow(cli, dir, task);
+  const axiMs = Math.round(performance.now() - started);
+  started = performance.now();
   const grep = await grepWorkflow(dir, task);
+  const grepMs = Math.round(performance.now() - started);
   const axiTokens = axi.outputs.reduce((sum, o) => sum + estimateTokens(stable(o)), 0);
   const grepTokens = estimateTokens(grep.text);
   return {
@@ -381,6 +396,8 @@ export async function compareTask(cli: string, dir: string, task: Task): Promise
     hits: grep.hits,
     axiCommands: axi.commands.map((c) => `ts-axi ${c}`),
     grepCommands: grep.commands,
+    axiMs,
+    grepMs,
   };
 }
 
@@ -436,6 +453,22 @@ export function reportTable(rows: { repo: string; result: TaskResult }[]): strin
   const lines = ["| task | repo | ts-axi tokens | grep tokens | ratio | recall |", "| --- | --- | ---: | ---: | ---: | --- |"];
   for (const { repo, result: r } of rows) {
     lines.push(`| ${r.task.name} | ${repo} | ${r.axiTokens} | ${r.grepTokens} | ${r.ratio.toFixed(2)} | ${recallLabel(r.recall)} |`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(ms < 1000 ? 2 : 1)} s`;
+
+/** Markdown table of tool calls and time: measured command time, and the task time estimated at TURN_MS per call. */
+export function speedTable(rows: { repo: string; result: TaskResult }[]): string {
+  const lines = [
+    "| task | repo | ts-axi calls | grep calls | ts-axi command time | grep command time | est. task time ts-axi | est. task time grep |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+  ];
+  for (const { repo, result: r } of rows) {
+    const a = r.axiCommands.length;
+    const g = r.grepCommands.length;
+    lines.push(`| ${r.task.name} | ${repo} | ${a} | ${g} | ${seconds(r.axiMs)} | ${seconds(r.grepMs)} | ${seconds(taskMs(r.axiMs, a))} | ${seconds(taskMs(r.grepMs, g))} |`);
   }
   return `${lines.join("\n")}\n`;
 }
