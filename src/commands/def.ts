@@ -3,6 +3,7 @@ import type { CommandContext } from "../context.js";
 import { semanticFor } from "../scope.js";
 import { textualScan, textualScanHint } from "./impact.js";
 import { block, fenced, helpBlock, out } from "../render.js";
+import { isOutside, missFallback, missRows, notSearched, outsideReason } from "./miss.js";
 import { isFunctionLike, kindFromScriptElement, parseTarget, type Declaration, type SymbolGroup } from "../symbols.js";
 import {
   BODY_LINES,
@@ -30,7 +31,8 @@ flags[8]:
 output:
   1 match = file, line, kind, exported, signature + body fenced with file line numbers
   several = matches[n]{at,kind,signature} (at = path:line) (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms (--in, --kind, Class.member, --exported) with how many each keeps
-  none = matches: 0 + did_you_mean; when the name still occurs in Project files, help gives the refs --grep that lists those textual matches
+  not indexed = a function-local Declaration (local_to: Comp) or one in a file the tsconfig leaves out (project: outside (not in tsconfig.json | own tsconfig x | Deno x/deno.json)) shows the same way; several = matches[n]{at,kind,name,where} (at = path:line:col)
+  none = matches: 0 + did_you_mean; when the name still occurs in source files (left-out files too), help gives the refs --grep that lists those textual matches
 examples[5]:
   ts-axi def User
   ts-axi def User.save
@@ -41,13 +43,13 @@ examples[5]:
 
 const COMMAND = "ts-axi def";
 
-function detail(ctx: Opened, decls: Declaration[], full: boolean, label: string, extra: Record<string, unknown> = {}): string {
+function detail(ctx: Opened, decls: Declaration[], full: boolean, label: string, extra: Record<string, unknown> = {}, at?: string): string {
   const primary = decls.find((d) => d.hasBody) ?? decls[0]!;
   const first = decls[0]!;
   const from = Math.min(...decls.map((d) => d.line));
   const to = Math.max(...decls.map((d) => d.endLine));
   const body = numberedLines(ctx.index.text(ctx.index.abs(primary.file)) ?? "", from, to, full ? undefined : BODY_LINES);
-  const position = `${first.file}:${first.nameLine}`;
+  const position = at ?? `${first.file}:${first.nameLine}`;
   const help = [`Run \`ts-axi refs ${position}\` for its references`];
   if (isFunctionLike(primary.kind)) help.push(`Run \`ts-axi callers ${position}\` for its call sites`);
   help.push(`Run \`ts-axi outline ${primary.file}\` for the rest of the file`);
@@ -61,6 +63,7 @@ function detail(ctx: Opened, decls: Declaration[], full: boolean, label: string,
       exported: primary.exported,
       signature: first.signature,
       ...(decls.filter((d) => !d.hasBody).length > 0 ? { overloads: decls.filter((d) => !d.hasBody).length } : {}),
+      ...(isOutside(ctx, ctx.index.abs(primary.file)) ? { project: outsideReason(ctx, ctx.index.abs(primary.file)) } : {}),
       ...extra,
     }),
     fenced("body", body),
@@ -109,9 +112,22 @@ export async function defCommand(args: string[], ctx: CommandContext): Promise<s
   const groups: SymbolGroup[] = resolveNameTarget(opened, target, f);
   if (groups.length === 1) return detail(opened, groups[0]!.decls, full, label);
   if (groups.length === 0) {
+    const miss = missFallback(opened, target, f);
+    if (miss.hits.length === 1) {
+      const hit = miss.hits[0]!;
+      return detail(opened, [hit.decl], full, hit.at, hit.localTo !== undefined ? { local_to: hit.localTo } : {}, hit.at);
+    }
+    if (miss.hits.length > 1) {
+      return out(
+        block({ ...(opened.warning ? { warning: opened.warning } : {}), symbol: label, ...missRows(miss, MATCH_ROWS) }),
+        helpBlock(miss.hits.slice(0, 3).map((h) => `Run \`ts-axi def ${h.at}\` for the one ${h.localTo !== undefined ? `in ${h.localTo}` : `in ${h.decl.file}`}`)),
+      );
+    }
     const suggested = suggestions(opened, target);
-    const text = f.fuzzy ? 0 : textualScan(opened, target.member ?? target.name).length;
-    const help = [...(text > 0 ? [textualScanHint(label, text)] : []), ...suggested.slice(0, 2).map((s) => `Run \`ts-axi def ${s}\``)];
+    const rows = f.fuzzy ? [] : textualScan(opened, target.member ?? target.name);
+    const text = rows.length;
+    const outsideCount = rows.filter((r) => isOutside(opened, opened.index.abs(r.file))).length;
+    const help = [...(text > 0 ? [textualScanHint(label, text, outsideCount)] : []), ...suggested.slice(0, 2).map((s) => `Run \`ts-axi def ${s}\``)];
     if (!f.fuzzy) help.push(`Run \`ts-axi def ${label} --fuzzy\` for substring matches`);
     if (f.kind || f.in.length > 0 || f.exported) help.push(`Drop --kind / --in / --exported to widen the search`);
     return out(
@@ -119,6 +135,7 @@ export async function defCommand(args: string[], ctx: CommandContext): Promise<s
         ...(opened.warning ? { warning: opened.warning } : {}),
         matches: 0,
         ...(suggested.length > 0 ? { did_you_mean: suggested } : {}),
+        ...notSearched(miss),
       }),
       helpBlock(help),
     );

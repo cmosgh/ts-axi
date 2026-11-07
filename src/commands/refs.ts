@@ -9,6 +9,7 @@ import { block, helpBlock, out } from "../render.js";
 import { importerIndexFor, REFS_HOPS, scopeFields, scopeHelp, semanticFor, type ScopeInfo } from "../scope.js";
 import { loadTemplates, templatesLine, templateTarget, templateUsages } from "../templates.js";
 import { byDepthThenPath } from "../walk.js";
+import { isOutside, missFallback, missRows, notSearched, outsideLine, outsideReason, outsideSeeds, type MissHit, type MissResult } from "./miss.js";
 import { detectWorkspace, isMultiProject } from "../workspace.js";
 import { isTestFile } from "../settings.js";
 import { isFunctionLike, kindFromScriptElement, parseTarget, registrationOf, type Declaration, type Kind } from "../symbols.js";
@@ -43,6 +44,9 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   via_implementations: n (Impl.member) = References to implementations or overrides of the Symbol; not in refs_total
   implementations: n = members that implement or override the Symbol (their Declarations are never refs)
   matches: 0 under -P lists found_outside_project[n]{file,line} when the name is declared outside that Project
+  local_to: Comp = the name is a function-local Declaration (not indexed): its References from the declaring file
+  matches: 0 + project: outside (...) = declared only in a file the tsconfig leaves out: outside_project + unresolved list its textual matches; the help position target runs the checker with the left-out files added (project: outside on that output)
+  matches[n]{at,kind,name,where} = several function-local or left-out Declarations; pick one by its path:line:col
   refs_total: 0 under -P in a workspace lists found_outside_project[n]{file,line} = importers outside that Project
   scope = in a monorepo without -P the program is the declaring file + its importers (scope_partial: true when the importer scan was capped)
   tsconfig: x (n referenced configs) = a references-only tsconfig expanded to the configs it references
@@ -59,7 +63,7 @@ output:
   symbol, kind, declared_at, refs_total, files, tests, refs[n]{file,line,context} (Declarations excluded), elapsed_ms
   ${VIA_DOC}
   note = the name is registered by a string ('Name' in .controller('Name', fn), or fn a same-file function named by identifier) - its uses are textual; add --grep
-  matches: 0 = no Declaration of the name; help counts its whole-word matches in Project files, and --grep lists them in unresolved with note 'no declaration found - textual matches only'
+  matches: 0 = no Declaration of the name; help counts its whole-word matches in source files (left-out files too), and --grep lists them in unresolved with note 'no declaration found - textual matches only' (outside_project = the share in files the tsconfig leaves out)
   path:line = the declaration that starts the line (a function before its parameters, a property before its value's parameters; siblings like 'const a = 1, b = 2' list identifiers - add :col)
   an ambiguous name lists matches[n] (at most ${MATCH_ROWS}; matches_total + truncated past that) + the narrowing forms; nothing is analysed
 examples[4]:
@@ -131,7 +135,9 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const warning = opened.warning ? { warning: opened.warning } : {};
 
   // Resolve to exactly one Symbol before building a program.
-  let resolved: Resolved;
+  let resolved: Resolved | undefined;
+  let local: MissHit | undefined;
+  let miss: MissResult | undefined;
   if (target.kind === "name") {
     const groups = resolveNameTarget(opened, target, f);
     if (groups.length === 0) {
@@ -155,14 +161,35 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
           ]),
         );
       }
+      miss = missFallback(opened, target, f);
+      if (miss.hits.length > 1) {
+        return out(
+          block({ ...warning, symbol: label, ambiguous: `${miss.hits.length} Declarations outside the index - pick one`, ...missRows(miss, MATCH_ROWS) }),
+          helpBlock(miss.hits.slice(0, 3).map((h) => `Run \`ts-axi ${name} ${h.at}\` for the one ${h.localTo !== undefined ? `in ${h.localTo}` : `in ${h.decl.file}`}`)),
+        );
+      }
+      const hit = miss.hits[0];
+      if (hit && hit.localTo !== undefined) {
+        // A local is file-scoped: the normal position path finds every Reference.
+        local = hit;
+        resolved = { absFile: hit.abs, pos: hit.decl.namePos, decl: hit.decl };
+      } else if (hit) {
+        return outsideMiss(opened, hit, { warning, name, limit, label: target.member ?? target.name });
+      }
+    }
+    if (resolved) {
+      // A local found by the miss fallback.
+    } else if (groups.length === 0) {
       // No Declaration, but the name may still be written: an untyped property set up elsewhere.
       const text = f.fuzzy ? [] : textualScan(opened, target.member ?? target.name);
+      const outsideText = outsideLine(opened, text);
       if (show.grep) {
         return out(
           block({
             ...warning,
             matches: 0,
             note: "no declaration found - textual matches only",
+            ...(outsideText ? { outside_project: outsideText } : {}),
             unresolved: text.length === 0 ? 0 : text.slice(0, limit),
             ...(text.length > limit ? { unresolved_total: text.length } : {}),
           }),
@@ -174,22 +201,22 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
       }
       const suggested = suggestions(opened, target);
       return out(
-        block({ ...warning, matches: 0, ...(suggested.length > 0 ? { did_you_mean: suggested } : {}) }),
+        block({ ...warning, matches: 0, ...(suggested.length > 0 ? { did_you_mean: suggested } : {}), ...(miss ? notSearched(miss) : {}) }),
         helpBlock([
-          ...(text.length > 0 ? [textualScanHint(label, text.length)] : []),
+          ...(text.length > 0 ? [textualScanHint(label, text.length, text.filter((r) => isOutside(opened, opened.index.abs(r.file))).length)] : []),
           ...suggested.slice(0, 2).map((s) => `Run \`ts-axi ${name} ${s}\``),
           ...(f.fuzzy ? [] : [`Run \`ts-axi def ${label} --fuzzy\` for substring matches`]),
         ]),
       );
-    }
-    if (groups.length > 1) {
+    } else if (groups.length > 1) {
       return out(
         block({ ...warning, symbol: label, ambiguous: `${groups.length} Symbols - pick one`, ...matchRows(groups) }),
         helpBlock(narrowHints(opened, name, groups, f, `${label}${filterSuffix(f, project)}`, target)),
       );
+    } else {
+      const decl = groups[0]!.decls[0]!;
+      resolved = { absFile: opened.index.abs(decl.file), pos: decl.namePos, decl, seeds: [...new Set(groups[0]!.decls.map((d) => opened.index.abs(d.file)))] };
     }
-    const decl = groups[0]!.decls[0]!;
-    resolved = { absFile: opened.index.abs(decl.file), pos: decl.namePos, decl, seeds: [...new Set(groups[0]!.decls.map((d) => opened.index.abs(d.file)))] };
   } else {
     const at = resolvePosition(opened.index, ctx.cwd, target);
     if (at.kind === "none") {
@@ -204,12 +231,19 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
     resolved = at.kind === "decl" ? { absFile: at.abs, pos: at.decl.namePos, decl: at.decl } : { absFile: at.abs, pos: at.pos };
   }
 
-  let built = semanticFor(opened, resolved.seeds ?? [resolved.absFile], resolved.decl ? REFS_HOPS : 0);
-  if (!resolved.decl && built.scope) {
+  // A file the tsconfig leaves out brings the other left-out files that name the identifier.
+  const seedsOf = (files: string[], abs: string, pos: number): string[] => {
+    if (!isOutside(opened, abs)) return files;
+    const sf = opened.index.sourceFile(abs);
+    const word = sf ? /^[\w$]+/.exec(sf.text.slice(pos))?.[0] : undefined;
+    return [...new Set([...files, ...(word ? outsideSeeds(opened, word) : [])])];
+  };
+  let built = semanticFor(opened, seedsOf(resolved.seeds ?? [resolved.absFile], resolved.absFile, resolved.pos), resolved.decl ? REFS_HOPS : 0);
+  if (!resolved.decl && (built.scope || isOutside(opened, resolved.absFile))) {
     // A use position: find its Declaration in a small program, then scope around the declaring file.
     const at = built.semantic.definitionAt(resolved.absFile, resolved.pos);
     if (at && at.line > 0) resolved = { absFile: at.absFile, pos: at.pos };
-    built = semanticFor(opened, [resolved.absFile], REFS_HOPS);
+    built = semanticFor(opened, seedsOf([resolved.absFile], resolved.absFile, resolved.pos), REFS_HOPS);
   }
   const { semantic, scope } = built;
   const def = semantic.definitionAt(resolved.absFile, resolved.pos);
@@ -220,8 +254,17 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   const decl = (found && registrationOf(found, opened.index.declarations(opened.index.abs(found.file)))) ?? found;
   const kind: Kind = decl?.kind ?? kindFromScriptElement(def?.kind ?? semantic.quickInfo(resolved.absFile, resolved.pos)?.kind ?? "");
   const symbol = decl?.qualifiedName ?? def?.name ?? label;
-  const declaredAt = decl ? `${decl.file}:${decl.nameLine}` : def && def.line > 0 ? `${def.file}:${def.line}` : "(outside the Project)";
-  const header = { ...warning, ...projectFields(opened), symbol, kind, declared_at: declaredAt };
+  const declaredAt = local ? local.at : decl ? `${decl.file}:${decl.nameLine}` : def && def.line > 0 ? `${def.file}:${def.line}` : "(outside the Project)";
+  const declaredAbs = decl ? opened.index.abs(decl.file) : def && def.line > 0 ? def.absFile : undefined;
+  const header = {
+    ...warning,
+    ...projectFields(opened),
+    symbol,
+    kind,
+    declared_at: declaredAt,
+    ...(local ? { local_to: local.localTo } : {}),
+    ...(declaredAbs && isOutside(opened, declaredAbs) ? { project: outsideReason(opened, declaredAbs) } : {}),
+  };
   const explicit = Boolean(project || opened.settings.project);
   const declaredFile = decl?.file ?? (def && def.line > 0 ? def.file : undefined);
   const localFile = isPlainLocal(opened.index, decl) ? opened.index.abs(decl.file) : undefined;
@@ -234,6 +277,30 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
   return mode === "calls"
     ? renderCallers(semantic, opened, resolved, header, { ...o, limit, depth })
     : renderRefs(semantic, opened, resolved, header, { ...o, limit, kind });
+}
+
+/**
+ * One Declaration in a file the tsconfig leaves out: no semantic program for a name target, so the
+ * textual rows of the name (Project + left-out files) and the position target that does run one.
+ */
+function outsideMiss(opened: Opened, hit: MissHit, o: { warning: Record<string, unknown>; name: string; limit: number; label: string }): string {
+  const rows = textualScan(opened, o.label).filter((r) => !(r.file === hit.decl.file && r.line === hit.decl.nameLine));
+  const outsideText = outsideLine(opened, rows);
+  return out(
+    block({
+      ...o.warning,
+      matches: 0,
+      declared_at: `${hit.decl.file}:${hit.decl.nameLine}`,
+      project: hit.outside,
+      ...(outsideText ? { outside_project: outsideText } : {}),
+      unresolved: rows.length === 0 ? 0 : rows.slice(0, o.limit),
+      ...(rows.length > o.limit ? { unresolved_total: rows.length } : {}),
+    }),
+    helpBlock([
+      `Run \`ts-axi ${o.name} ${hit.at}\` for semantic ${o.name === "callers" ? "call sites" : "References"} - a position target adds the left-out files to the program`,
+      `Run \`ts-axi def ${hit.at}\` for the declaration body`,
+    ]),
+  );
 }
 
 interface Common {
