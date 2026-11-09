@@ -739,6 +739,20 @@ describe("nested declarations", () => {
   const decls = (text: string, file = "src/a.js") =>
     collectDeclarations(parseSource(file, text), file).map((d) => `${d.kind} ${d.qualifiedName}${d.exported ? " exported" : ""}${d.nameless ? " nameless" : ""}`);
 
+  it("module.exports / exports.X / export default class expressions list the class and its members", () => {
+    const text = [
+      "const lut = {};",
+      "module.exports = class Ctrl {",
+      "  async status(id) { return lut[id]; }",
+      "  static create() {}",
+      "};",
+      "exports.Helper = class { run() {} };",
+      "",
+    ].join("\n");
+    expect(decls(text)).toEqual(["variable lut", "class Ctrl exported", "method Ctrl.status exported", "method Ctrl.create exported", "class Helper exported", "method Helper.run exported"]);
+    expect(decls("export default class { go() {} }\n", "src/a.ts")).toContain("method default.go exported");
+  });
+
   it("call-registered callbacks take the string name; the DI array form takes its last element", () => {
     const text = "angular.module('m').controller('MainCtrl', ['$scope', function ($scope) {}]).factory('api', function () { return { get: function () {} }; }).run(function () {});\n";
     expect(decls(text)).toEqual(["function MainCtrl exported nameless", "function api exported nameless", "method api.get exported", "function run exported nameless"]);
