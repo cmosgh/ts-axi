@@ -468,6 +468,24 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     });
   };
 
+  const classMembers = (cls: ts.ClassLikeDeclaration, exported: boolean, qualified: string): void => {
+    for (const member of cls.members) {
+      if (ts.isSemicolonClassElement(member) || ts.isClassStaticBlockDeclaration(member) || ts.isIndexSignatureDeclaration(member)) continue;
+      const memberName = ts.isConstructorDeclaration(member) ? "constructor" : nameText(member.name, sf);
+      if (!memberName) continue;
+      const nameNode = ts.isConstructorDeclaration(member)
+        ? member.getChildren(sf).find((c) => c.kind === ts.SyntaxKind.ConstructorKeyword)
+        : member.name;
+      add(member, nameNode, memberName, exported && !isPrivateMember(member), qualified);
+    }
+  };
+  /** `module.exports = class X {...}`, `exports.X = class {...}`, `export default class {...}` expression. */
+  const exportedClass = (cls: ts.ClassExpression, fallback: string): void => {
+    const name = cls.name?.text ?? fallback;
+    add(cls, cls.name, name, true);
+    classMembers(cls, true, name);
+  };
+
   const nested = (raw: Omit<Raw, "qualifiedName" | "hasBody"> & { qualifiedName?: string }): void => {
     raws.push({ ...raw, qualifiedName: raw.qualifiedName ?? (raw.parentName ? `${raw.parentName}.${raw.name}` : raw.name), hasBody: true });
   };
@@ -778,12 +796,14 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
     if (!ts.isPropertyAccessExpression(left)) return;
     const target = compact(left, sf);
     if (target === "module.exports") {
-      if (ts.isObjectLiteralExpression(right)) objectMembers(right, "exports", true);
+      if (ts.isClassExpression(right)) exportedClass(right, "exports");
+      else if (ts.isObjectLiteralExpression(right)) objectMembers(right, "exports", true);
       else if (asFunction(right)) returnedMembers(asFunction(right)!.body, "exports", true);
       else stateArray(right);
       return;
     }
     if (target === `exports.${left.name.text}` || target === `module.exports.${left.name.text}`) {
+      if (ts.isClassExpression(right)) return exportedClass(right, left.name.text);
       if (ts.isObjectLiteralExpression(right)) objectMembers(right, left.name.text, true);
       else stateArray(right);
     }
@@ -846,7 +866,8 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
       else callChain(expr);
     } else if (ts.isExportAssignment(statement)) {
       const value = unwrap(statement.expression);
-      if (ts.isObjectLiteralExpression(value)) objectMembers(value, "default", true);
+      if (ts.isClassExpression(value)) exportedClass(value, "default");
+      else if (ts.isObjectLiteralExpression(value)) objectMembers(value, "default", true);
       else stateArray(statement.expression);
     } else if (ts.isIfStatement(statement)) {
       scriptStatement(statement.thenStatement, inIife);
@@ -887,15 +908,7 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
         add(statement, statement.name, name, exported, parent);
         const qualified = parent ? `${parent}.${name}` : name;
         if (ts.isClassDeclaration(statement)) {
-          for (const member of statement.members) {
-            if (ts.isSemicolonClassElement(member) || ts.isClassStaticBlockDeclaration(member) || ts.isIndexSignatureDeclaration(member)) continue;
-            const memberName = ts.isConstructorDeclaration(member) ? "constructor" : nameText(member.name, sf);
-            if (!memberName) continue;
-            const nameNode = ts.isConstructorDeclaration(member)
-              ? member.getChildren(sf).find((c) => c.kind === ts.SyntaxKind.ConstructorKeyword)
-              : member.name;
-            add(member, nameNode, memberName, exported && !isPrivateMember(member), qualified);
-          }
+          classMembers(statement, exported, qualified);
         } else if (ts.isInterfaceDeclaration(statement)) {
           for (const member of statement.members) {
             const memberName = nameText(member.name, sf);
