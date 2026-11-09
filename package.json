@@ -1,6 +1,6 @@
 {
   "name": "ts-axi",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "AXI-compliant TypeScript symbol CLI for agents - definitions, references, callers, file outlines and change impact (blast radius) with token-efficient TOON output",
   "type": "module",
   "keywords": [
