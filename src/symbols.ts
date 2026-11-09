@@ -515,6 +515,10 @@ export function collectDeclarations(sf: ts.SourceFile, file: string): Declaratio
         const value = unwrap(prop.initializer);
         if (fn) nested({ start: prop.getStart(sf), end: prop.end, kind: "method", name, parentName: holder, exported, signature: headUntil(prop, fn, sf), namePos: prop.name.getStart(sf) });
         else if (scope && ts.isIdentifier(value)) aliasedMember(scope, value, name, holder, exported, prop.name);
+        else if (holder === "exports" && !ts.isIdentifier(value)) {
+          // `module.exports = { x: make(...) }`: the property is the only Declaration a destructured require can reach.
+          nested({ start: prop.getStart(sf), end: prop.end, kind: "property", name, parentName: holder, exported, signature: clip(tokenText(prop, sf, prop.getStart(sf), prop.end)), namePos: prop.name.getStart(sf) });
+        }
       } else if (scope && ts.isShorthandPropertyAssignment(prop)) {
         aliasedMember(scope, prop.name, name, holder, exported, prop.name);
       }
