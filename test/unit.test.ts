@@ -863,6 +863,7 @@ describe("nested declarations", () => {
       "method Store.create",
       "method exports.a exported",
       "method exports.b exported",
+      "property exports.c exported",
       "method exports.d exported",
       "method methods.m exported",
       "method Template.home.helpers.h exported",

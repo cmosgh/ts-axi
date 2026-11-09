@@ -725,9 +725,84 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
     return undefined;
   };
 
-  const split = (absFile: string, pos: number): { result: ReferenceSplit; raw: Map<string, RawRef>; buckets: Map<string, "direct" | "via" | "dropped"> } => {
+  /** Where findReferences stops on CommonJS: a `module.exports` property of the Symbol, and the locals of `const { x } = require()`. */
+  const commonJsHop = (fileName: string, start: number): number | undefined => {
+    const sf = program.getSourceFile(fileName);
+    if (!sf) return undefined;
+    const id = nodeAt(sf, start);
+    if (!ts.isIdentifier(id)) return undefined;
+    const parent = id.parent;
+    if ((ts.isShorthandPropertyAssignment(parent) && parent.name === id) || (ts.isPropertyAssignment(parent) && parent.initializer === id)) {
+      return isModuleExportsObject(parent.parent) ? parent.name.getStart(sf) : undefined;
+    }
+    const element = ts.isBindingElement(parent) ? parent : undefined;
+    if (!element || !ts.isIdentifier(element.name) || !ts.isObjectBindingPattern(element.parent)) return undefined;
+    const decl = element.parent.parent;
+    if (!ts.isVariableDeclaration(decl) || !decl.initializer || !isRequireCall(decl.initializer)) return undefined;
+    return element.name.getStart(sf);
+  };
+
+  /** findReferences of the Symbol at `pos`, with the CommonJS hops of `commonJsHop` merged into the target group. */
+  const referenceGroups = (absFile: string, pos: number): { groups: ts.ReferencedSymbol[]; extra: ts.ReferenceEntry[] } => {
     const twin = declarationTwin(absFile, pos);
     const groups = [...(service.findReferences(absFile, pos) ?? []), ...(twin ? service.findReferences(twin.file, twin.pos) ?? [] : [])];
+    const covers = (r: ts.ReferenceEntry) => resolve(r.fileName) === resolve(absFile) && r.textSpan.start <= pos && pos <= r.textSpan.start + r.textSpan.length;
+    const target = groups.find((g) => g.references.some(covers));
+    if (!target) return { groups, extra: [] };
+    const seen = new Set(groups.flatMap((g) => g.references.map((r) => `${resolve(r.fileName)}#${r.textSpan.start}`)));
+    const extra: ts.ReferenceEntry[] = [];
+    const hops = new Set<string>();
+    const queue = [...target.references];
+    for (let i = 0; i < queue.length && i < 500; i++) {
+      const hop = commonJsHop(queue[i]!.fileName, queue[i]!.textSpan.start);
+      const hopKey = `${resolve(queue[i]!.fileName)}#${hop}`;
+      if (hop === undefined || hops.has(hopKey)) continue;
+      hops.add(hopKey);
+      for (const g of service.findReferences(queue[i]!.fileName, hop) ?? []) {
+        for (const r of g.references) {
+          const key = `${resolve(r.fileName)}#${r.textSpan.start}`;
+          // A renamed local (`{ x: y }`) declares `y`; its uses are the References.
+          if (seen.has(key) || (r.isDefinition && resolve(r.fileName) === resolve(queue[i]!.fileName) && r.textSpan.start === hop && hop !== queue[i]!.textSpan.start)) continue;
+          seen.add(key);
+          const entry = { ...r, isDefinition: false };
+          extra.push(entry);
+          queue.push(entry);
+        }
+      }
+    }
+    return { groups: extra.length === 0 ? groups : groups.map((g) => (g === target ? { ...g, references: [...g.references, ...extra] } : g)), extra };
+  };
+
+  /** Call sites among CommonJS-hop References; call hierarchy does not reach a destructured `require()` local. */
+  const commonJsCalls = (refs: readonly ts.ReferenceEntry[]): CallSite[] => {
+    const sites: CallSite[] = [];
+    for (const ref of refs) {
+      const sf = program.getSourceFile(ref.fileName);
+      const loc = location(ref.fileName, ref.textSpan.start);
+      if (!sf || !loc) continue;
+      const id = nodeAt(sf, ref.textSpan.start);
+      const call = id.parent;
+      if (!(ts.isCallExpression(call) || ts.isNewExpression(call)) || call.expression !== id) continue;
+      const item = enclosingItem(sf, call);
+      sites.push({ ...loc, caller: callerName(item), item });
+    }
+    return sites;
+  };
+
+  /** Call hierarchy item of the nearest named function around `node`, else the file itself. */
+  const enclosingItem = (sf: ts.SourceFile, node: ts.Node): ts.CallHierarchyItem => {
+    for (let n: ts.Node | undefined = node.parent; n && !ts.isSourceFile(n); n = n.parent) {
+      if (!ts.isFunctionLike(n)) continue;
+      const prepared = service.prepareCallHierarchy(sf.fileName, n.getStart(sf));
+      const item = Array.isArray(prepared) ? prepared[0] : prepared;
+      if (item && item.kind !== ts.ScriptElementKind.scriptElement) return item;
+    }
+    const span = { start: 0, length: sf.end };
+    return { name: sf.fileName, kind: ts.ScriptElementKind.scriptElement, file: sf.fileName, span, selectionSpan: span };
+  };
+
+  const split = (absFile: string, pos: number): { result: ReferenceSplit; raw: Map<string, RawRef>; buckets: Map<string, "direct" | "via" | "dropped"> } => {
+    const { groups } = referenceGroups(absFile, pos);
     const descriptors: Array<GroupDescriptor<RawRef>> = [];
     let target = -1;
     let flagged = -1;
@@ -830,6 +905,7 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
       const seen = new Set<string>();
       return items
         .flatMap((item) => splitSites(item.file, item.selectionSpan.start, [...service.provideCallHierarchyIncomingCalls(item.file, item.selectionSpan.start), ...twinCalls]))
+        .concat(commonJsCalls(referenceGroups(absFile, pos).extra))
         .filter((site) => {
           const key = `${site.file}:${site.line}:${site.col}`;
           return !seen.has(key) && Boolean(seen.add(key));
@@ -903,4 +979,19 @@ export function openProject(
   project ??= loadProject(root, location);
   const index = createSyntacticIndex(root, project);
   return { cwd, root, location, index, ...(project.implicit ? { warning: IMPLICIT_WARNING } : {}) };
+}
+
+/** The object of `module.exports = {...}`. */
+function isModuleExportsObject(node: ts.Node): boolean {
+  if (!ts.isObjectLiteralExpression(node)) return false;
+  let assign: ts.Node = node.parent;
+  while (ts.isParenthesizedExpression(assign)) assign = assign.parent;
+  if (!ts.isBinaryExpression(assign) || assign.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false;
+  const left = assign.left;
+  return ts.isPropertyAccessExpression(left) && ts.isIdentifier(left.expression) && left.expression.text === "module" && left.name.text === "exports";
+}
+
+function isRequireCall(expr: ts.Expression): boolean {
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  return ts.isCallExpression(expr) && ts.isIdentifier(expr.expression) && expr.expression.text === "require" && expr.arguments.length === 1;
 }

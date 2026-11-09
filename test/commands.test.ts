@@ -812,6 +812,27 @@ describe("plain JavaScript packages (no tsconfig)", () => {
   });
 });
 
+describe("CommonJS destructured require", () => {
+  let cjs: (...argv: string[]) => Promise<RunResult>;
+  beforeAll(() => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "ts-axi-cjs-")));
+    mkdirSync(join(dir, "lib"));
+    writeFileSync(join(dir, "lib", "guard.js"), "const wrap = (x) => () => x;\nfunction scopeList(rows) { return rows; }\nmodule.exports = {\n  canWrite: wrap('w'),\n  scopeList,\n};\n");
+    writeFileSync(join(dir, "app.js"), "const { canWrite, scopeList: scope } = require('./lib/guard');\nfunction handler(rows) {\n  canWrite();\n  return scope(rows);\n}\nmodule.exports = handler;\n");
+    cjs = runner(dir);
+  });
+  const rows = async (...argv: string[]) => ((toon((await cjs(...argv)).stdout)["refs"] as Payload[]) ?? []).map((r) => `${r["file"]}:${r["line"]}${r["caller"] ? ` ${r["caller"]}` : ""}`);
+
+  it("refs follow a module.exports property into the requiring file's locals", async () => {
+    expect(await rows("refs", "canWrite")).toEqual(["app.js:1", "app.js:3"]);
+    expect(await rows("refs", "scopeList")).toEqual(["app.js:1", "app.js:4", "lib/guard.js:5"]);
+  });
+
+  it("callers find calls through a renamed destructured local", async () => {
+    expect(await rows("callers", "scopeList")).toEqual(["app.js:4 handler"]);
+  });
+});
+
 describe("legacy JavaScript outline / def / refs", () => {
   let legacy: (...argv: string[]) => Promise<RunResult>;
   beforeAll(() => {
