@@ -8,4 +8,5 @@
 - [`mongo-rw-axi`](https://www.npmjs.com/package/mongo-rw-axi): Write-capable MongoDB CLI for agents, loopback hosts only
 - [`mysql-axi`](https://www.npmjs.com/package/mysql-axi): Read-only MySQL CLI for agents
 - [`mysql-rw-axi`](https://www.npmjs.com/package/mysql-rw-axi): Write-capable MySQL CLI for agents, loopback hosts only
+- [`secrets-axi`](https://www.npmjs.com/package/secrets-axi): Secrets guard CLI for agents
 <!-- axi-tools:end -->

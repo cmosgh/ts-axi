@@ -351,6 +351,7 @@ CI runs the first two on Node 22 and 24, the built CLI on Node 20, and the integ
 - [`hetzner-axi`](https://github.com/cmosgh/hetzner-axi): Hetzner Cloud CLI for agents
 - [`mongo-axi`](https://github.com/cmosgh/mongo-axi): Read-only MongoDB CLI for agents, plus `mongo-rw-axi` (write-capable MongoDB CLI for agents, loopback hosts only)
 - [`mysql-axi`](https://github.com/cmosgh/mysql-axi): Read-only MySQL CLI for agents, plus `mysql-rw-axi` (write-capable MySQL CLI for agents, loopback hosts only)
+- [`secrets-axi`](https://github.com/cmosgh/secrets-axi): Secrets guard CLI for agents
 <!-- axi-tools:end -->
 
 ## License
