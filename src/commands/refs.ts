@@ -16,6 +16,8 @@ import { isFunctionLike, kindFromScriptElement, parseTarget, registrationOf, typ
 import {
   contextOf,
   declarationAt,
+  DIAGNOSTICS_DOC,
+  diagnosticsFields,
   filterSuffix,
   lineOf,
   MATCH_ROWS,
@@ -37,13 +39,17 @@ import {
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 const DEPTH_ROWS = 50;
+const TEST_ROWS = 20;
+const SAME_NAME_ROWS = 5;
 
-const SHARED_FLAGS = `--kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state> (narrows a name), --in <dir|glob> (repeatable; Declarations in these files), --exported, --fuzzy, --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} rows), --test-glob <glob> (repeatable; extra Test file pattern), --via (adds via rows with a via column), -P <tsconfig>, --ref <rev> (read the code at a git revision; working tree ignored), --json`;
+const SHARED_FLAGS = `--tests (lists Test file rows after the others; default a per-file count), --diagnostics (lists the TypeScript errors behind diagnostics), --kind <function|class|method|property|variable|interface|type|enum|enum-member|namespace|state> (narrows a name), --in <dir|glob> (repeatable; Declarations in these files), --exported, --fuzzy, --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} rows), --test-glob <glob> (repeatable; extra Test file pattern), --via (adds via rows with a via column), -P <tsconfig>, --ref <rev> (read the code at a git revision; working tree ignored), --json`;
 
 const VIA_DOC = `via_interface: n (Iface.member) = References through an interface or base member the Symbol implements or overrides - they MAY reach it; not in refs_total
   via_implementations: n (Impl.member) = References to implementations or overrides of the Symbol; not in refs_total
   implementations: n = members that implement or override the Symbol (their Declarations are never refs)
   matches: 0 under -P lists found_outside_project[n]{file,line} when the name is declared outside that Project
+  test_refs[n]{file,count} = rows in Test files, counted per file (biggest first, at most ${TEST_ROWS}); --tests lists them as rows after the others
+  ${DIAGNOSTICS_DOC}
   local_to: Comp = the name is a function-local Declaration (not indexed): its References from the declaring file
   matches: 0 + project: outside (...) = declared only in a file the tsconfig leaves out: outside_project + unresolved list its textual matches; the help position target runs the checker with the left-out files added (project: outside on that output)
   matches[n]{at,kind,name,where} = several function-local or left-out Declarations; pick one by its path:line:col
@@ -54,13 +60,14 @@ const VIA_DOC = `via_interface: n (Iface.member) = References through an interfa
   templates: n usages in m files = template uses (.html .htm .ejs .hbs .njk .pug) of a directive or component (<wap-select / wap-select / data-wap-select), its bindings (fallback-display-property= on that tag), a controller (ng-controller) or a filter (| money) - also for a function registered by identifier (.directive('fancyBox', fancyBox)), under the registered name; refs --grep lists them in unresolved`;
 
 export const REFS_HELP = `usage: ts-axi refs <name | Class.member | path:line[:col]> [flags]
-flags[13]:
+flags[15]:
   ${SHARED_FLAGS}
   --implementations (lists implementations[n]{file,line,symbol} instead of the count)
   --grep (adds unresolved[n]{file,line,context} - textual matches of the name that are not References; also searches .astro/.vue/.svelte/.mdx/.html)
   --kind calls = same as \`ts-axi callers\`
 output:
-  symbol, kind, declared_at, refs_total, files, tests, refs[n]{file,line,context} (Declarations excluded), elapsed_ms
+  symbol, kind, declared_at, refs_total, files, tests, refs[n]{file,line,context} (Declarations excluded; non-test files first), elapsed_ms
+  same_name_members: n (Other.prop) = for a property - members of other types with the same name (a DTO filled from an entity); their References are not counted; the names are listed up to ${SAME_NAME_ROWS}
   ${VIA_DOC}
   note = the name is registered by a string ('Name' in .controller('Name', fn), or fn a same-file function named by identifier) - its uses are textual; add --grep
   matches: 0 = no Declaration of the name; help counts its whole-word matches in source files (left-out files too), and --grep lists them in unresolved with note 'no declaration found - textual matches only' (outside_project = the share in files the tsconfig leaves out)
@@ -74,11 +81,13 @@ examples[4]:
 `;
 
 export const CALLERS_HELP = `usage: ts-axi callers <name | Class.member | path:line[:col]> [flags]
-flags[12]:
+flags[14]:
   ${SHARED_FLAGS}
   --depth <1-3> (default 1; levels > 1 print callers_depthN[n]{caller,file,count}, no locations)
 output:
-  symbol, kind, declared_at, refs_total, files, tests, refs[n]{file,line,caller,context}, elapsed_ms
+  symbol, kind, declared_at, refs_total, files, tests, refs[n]{file,line,caller,context} (non-test files first), elapsed_ms
+  refs_total = calls only - the callee of a call, new, tagged template, decorator or JSX tag (fn.call/apply/bind count)
+  not_calls: n = References that are no call (mock setup like x.fn.mockResolvedValue; expect(x.fn); a callback passed on) - listed by refs
   caller = enclosing function or method; (top-level) for module code
   ${VIA_DOC}
 examples[3]:
@@ -112,6 +121,8 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
     { name: "--limit" },
     { name: "--test-glob", repeatable: true },
     { name: "--via", boolean: true },
+    { name: "--tests", boolean: true },
+    { name: "--diagnostics", boolean: true },
     ...(invoked === "calls" ? [{ name: "--depth" }] : [{ name: "--implementations", boolean: true }, { name: "--grep", boolean: true }]),
   ];
   const parsed = parseArgs(args, specs, command);
@@ -128,6 +139,8 @@ async function run(args: string[], ctx: CommandContext, invoked: Mode): Promise<
     via: bool(parsed, "--via"),
     implementations: invoked === "refs" && bool(parsed, "--implementations"),
     grep: invoked === "refs" && bool(parsed, "--grep"),
+    tests: bool(parsed, "--tests"),
+    diagnostics: bool(parsed, "--diagnostics"),
   };
   const started = performance.now();
   ctx = useRef(ctx, parsed);
@@ -399,15 +412,65 @@ function contextCell(opened: Opened, row: Row): string {
   return contextOf(lineOf(opened.index.text(opened.index.abs(row.file)), row.line), row.col);
 }
 
-function footer(semantic: SemanticProject, started: number, touched: string[]): Record<string, unknown> {
-  const diagnostics = semantic.diagnosticsCount(touched);
-  return { elapsed_ms: Math.round(performance.now() - started), ...(diagnostics > 0 ? { diagnostics } : {}) };
+function footer(semantic: SemanticProject, o: Common, touched: string[], command: string): { fields: Record<string, unknown>; help: string[] } {
+  const d = diagnosticsFields(semantic, touched, o.show.diagnostics, diagnosticsRerun(o, command));
+  return { fields: { elapsed_ms: Math.round(performance.now() - o.started), ...d.fields }, help: d.help };
 }
 
 interface Show {
   via: boolean;
   implementations: boolean;
   grep: boolean;
+  tests: boolean;
+  diagnostics: boolean;
+}
+
+/**
+ * Non-test rows first. Without `--tests` the Test file rows leave the list and become
+ * `test_refs[n]{file,count}`, with a hint to list them.
+ */
+function testSplit<T extends Row>(opened: Opened, rows: T[], o: Common, command: string): { listed: T[]; fields: Record<string, unknown>; help: string[] } {
+  const isTest = new Map<string, boolean>();
+  const testFile = (file: string): boolean => {
+    if (!isTest.has(file)) isTest.set(file, isTestFile(file, opened.settings));
+    return isTest.get(file)!;
+  };
+  const prod = rows.filter((r) => !testFile(r.file));
+  const tests = rows.filter((r) => testFile(r.file));
+  if (o.show.tests || tests.length === 0) return { listed: [...prod, ...tests], fields: {}, help: [] };
+  const counts = new Map<string, number>();
+  for (const r of tests) counts.set(r.file, (counts.get(r.file) ?? 0) + 1);
+  const perFile = [...counts].map(([file, count]) => ({ file, count })).sort((a, b) => b.count - a.count || a.file.localeCompare(b.file));
+  return {
+    listed: prod,
+    fields: { test_refs: perFile.slice(0, TEST_ROWS), ...(perFile.length > TEST_ROWS ? { test_refs_total: perFile.length } : {}) },
+    help: [`Run \`ts-axi ${command} ${o.declaredAt}${o.show.via ? " --via" : ""} --tests\` to list the ${tests.length} rows in Test files`],
+  };
+}
+
+/** Rerun with `--diagnostics` added. */
+function diagnosticsRerun(o: Common, command: string): string {
+  return `ts-axi ${command} ${o.declaredAt}${o.show.via ? " --via" : ""}${o.show.tests ? " --tests" : ""} --diagnostics`;
+}
+
+/** Properties of other types with the property's name: an entity field copied into a DTO is not a Reference. */
+function sameNameMembers(opened: Opened, o: Common, known: ReadonlySet<string>): { fields: Record<string, unknown>; help: string[] } {
+  const decl = o.decl;
+  if (!decl || decl.kind !== "property" || decl.parentName === undefined) return { fields: {}, help: [] };
+  const names = [
+    ...new Set(
+      opened.index
+        .findDeclarations({ name: decl.name })
+        .filter((d) => d.kind === "property" && d.parentName !== undefined && d.qualifiedName !== decl.qualifiedName && !known.has(d.qualifiedName))
+        .sort((a, b) => byDepthThenPath(a.file, b.file))
+        .map((d) => d.qualifiedName),
+    ),
+  ];
+  if (names.length === 0) return { fields: {}, help: [] };
+  return {
+    fields: { same_name_members: names.length <= SAME_NAME_ROWS ? viaLine(names.length, names) : names.length },
+    help: names.length <= SAME_NAME_ROWS ? [`Run \`ts-axi refs ${names[0]}\` for References of the same-named ${names[0]}`] : [],
+  };
 }
 
 const NAMELESS_NOTE = "registered by a string - References to it are textual (templates; DI arrays; route configs)";
@@ -472,17 +535,19 @@ function renderRefs(
   const via = sortRows([...split.via]);
   const impls = sortRows([...split.implementations]);
   const { files, tests, fileList } = summary(opened, rows);
-  const listed = mergedRows<ViaRow>(rows, via, o.show);
+  const testRows = testSplit(opened, mergedRows<ViaRow>(rows, via, o.show), o, "refs");
+  const listed = testRows.listed;
   const shown = listed.slice(0, o.limit);
   const truncated = shown.length < listed.length;
   const help: string[] = [];
   if (truncated) {
     help.push(
       o.limit < MAX_LIMIT
-        ? `Showing ${shown.length} of ${listed.length}; run \`ts-axi refs ${o.declaredAt}${o.show.via ? " --via" : ""} --limit ${Math.min(MAX_LIMIT, listed.length)}\` for more`
+        ? `Showing ${shown.length} of ${listed.length}; run \`ts-axi refs ${o.declaredAt}${o.show.via ? " --via" : ""}${o.show.tests ? " --tests" : ""} --limit ${Math.min(MAX_LIMIT, listed.length)}\` for more`
         : `Showing ${shown.length} of ${listed.length}; narrow by reading one file at a time`,
     );
   }
+  help.push(...testRows.help);
   if (via.length > 0 && !o.show.via) help.push(`Run \`ts-axi refs ${o.declaredAt} --via\` for the ${via.length} via References (${viaNames(via)})`);
   if (impls.length > 0 && !o.show.implementations) help.push(`Run \`ts-axi refs ${o.declaredAt} --implementations\` to list the ${impls.length} implementations`);
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
@@ -496,9 +561,13 @@ function renderRefs(
   if (text.help.length > 0) help.unshift(...text.help);
   else if (o.decl?.nameless && word && !o.show.grep && tpl.help.length === 0) help.unshift(`Run \`ts-axi refs ${o.declaredAt} --grep\` for textual matches of '${word}'`);
   help.unshift(...tpl.help);
+  const same = sameNameMembers(opened, o, new Set([...split.bases, ...via.map((v) => v.via!), ...impls.map((i) => i.name)]));
+  help.push(...same.help);
   if (isFunctionLike(o.kind)) help.push(`Run \`ts-axi callers ${o.declaredAt}\` for call sites with their enclosing function`);
   help.push(`Run \`ts-axi def ${o.declaredAt}\` for the declaration body`);
   help.push(...scopeHelp(o.scope));
+  const foot = footer(semantic, o, fileList, "refs");
+  help.push(...foot.help);
   return out(
     block({
       ...header,
@@ -508,6 +577,7 @@ function renderRefs(
       ...tpl.fields,
       files,
       tests,
+      ...same.fields,
       ...viaFields(via, split.bases),
       ...(impls.length > 0
         ? { implementations: o.show.implementations ? impls.map((r) => ({ file: r.file, line: r.line, symbol: r.name })) : impls.length }
@@ -523,11 +593,12 @@ function renderRefs(
             })),
           }),
       ...(truncated ? { truncated: true } : {}),
+      ...testRows.fields,
       ...(o.show.grep ? { unresolved: grepRows.length === 0 ? 0 : grepRows.slice(0, o.limit) } : {}),
       ...(grepRows.length > o.limit ? { unresolved_total: grepRows.length } : {}),
       ...outside.fields,
       ...scopeFields(o.scope),
-      ...footer(semantic, o.started, fileList),
+      ...foot.fields,
     }),
     helpBlock(help),
   );
@@ -549,7 +620,7 @@ function nextLevel(semantic: SemanticProject, sites: CallSite[], visited: Set<st
   for (const [key, site] of items) {
     if (visited.has(key)) continue;
     visited.add(key);
-    next.push(...semantic.incomingCallsOf(site.item));
+    next.push(...semantic.incomingCallsOf(site.item).filter((s) => !s.notCall));
   }
   return next;
 }
@@ -578,7 +649,7 @@ function renderCallers(
     ? (() => {
         const split = semantic.referenceSplit(resolved.absFile, resolved.pos);
         const known = [...split.direct, ...split.declarations, ...split.via, ...split.implementations, ...split.dropped, ...(sites ?? [])];
-        const calls = (sites ?? []).filter((s) => s.via === undefined).length;
+        const calls = (sites ?? []).filter((s) => s.via === undefined && !s.notCall).length;
         return textualFields(o, calls, withTemplates(unresolvedOf(opened, semantic, o, known), o.templates).length, false);
       })()
     : { fields: {}, help: [] };
@@ -586,15 +657,19 @@ function renderCallers(
   callerText.fields = { ...callerText.fields, ...tpl.fields };
   callerText.help = [...tpl.help, ...callerText.help];
   if (sites === undefined) {
+    const foot = footer(semantic, o, [], "callers");
     return out(
-      block({ ...header, refs_total: 0, ...callerText.fields, note: "not callable - no call hierarchy for this Symbol", ...scopeFields(o.scope), ...footer(semantic, o.started, []) }),
-      helpBlock([...callerText.help, `Run \`ts-axi refs ${o.declaredAt}\` for every Reference`]),
+      block({ ...header, refs_total: 0, ...callerText.fields, note: "not callable - no call hierarchy for this Symbol", ...scopeFields(o.scope), ...foot.fields }),
+      helpBlock([...callerText.help, `Run \`ts-axi refs ${o.declaredAt}\` for every Reference`, ...foot.help]),
     );
   }
-  const rows = sortRows(sites.filter((s) => s.via === undefined));
-  const via = sortRows(sites.filter((s) => s.via !== undefined));
+  const notCalls = sites.filter((s) => s.notCall && s.via === undefined).length;
+  const calls = sites.filter((s) => !s.notCall);
+  const rows = sortRows(calls.filter((s) => s.via === undefined));
+  const via = sortRows(calls.filter((s) => s.via !== undefined));
   const { files, tests, fileList } = summary(opened, rows);
-  const listed = mergedRows<CallSite>(rows, via, o.show);
+  const testRows = testSplit(opened, mergedRows<CallSite>(rows, via, o.show), o, "callers");
+  const listed = testRows.listed;
   const shown = listed.slice(0, o.limit);
   const truncated = shown.length < listed.length;
 
@@ -611,21 +686,29 @@ function renderCallers(
 
   const help: string[] = [];
   if (truncated) {
-    help.push(`Showing ${shown.length} of ${listed.length}; run \`ts-axi callers ${o.declaredAt}${o.show.via ? " --via" : ""} --limit ${Math.min(MAX_LIMIT, listed.length)}\` for more`);
+    help.push(`Showing ${shown.length} of ${listed.length}; run \`ts-axi callers ${o.declaredAt}${o.show.via ? " --via" : ""}${o.show.tests ? " --tests" : ""} --limit ${Math.min(MAX_LIMIT, listed.length)}\` for more`);
   }
+  help.push(...testRows.help);
   if (via.length > 0 && !o.show.via) help.push(`Run \`ts-axi callers ${o.declaredAt} --via\` for the ${via.length} via calls (${viaNames(via)})`);
   const top = shown.find((r) => r.caller !== "(top-level)");
   if (top && o.depth === 1) help.push(`Run \`ts-axi callers ${o.declaredAt} --depth 2\` for who calls the callers`);
   const outside = rows.length === 0 ? outsideImporters(opened, o) : { fields: {}, help: [] };
   help.unshift(...outside.help);
   help.unshift(...callerText.help);
-  help.push(`Run \`ts-axi refs ${o.declaredAt}${o.decl?.nameless ? " --grep" : ""}\` for every Reference (not only calls)`);
+  help.push(
+    notCalls > 0
+      ? `Run \`ts-axi refs ${o.declaredAt}${o.decl?.nameless ? " --grep" : ""}\` for the ${notCalls} not_calls with every other Reference`
+      : `Run \`ts-axi refs ${o.declaredAt}${o.decl?.nameless ? " --grep" : ""}\` for every Reference (not only calls)`,
+  );
   help.push(...scopeHelp(o.scope));
+  const foot = footer(semantic, o, fileList, "callers");
+  help.push(...foot.help);
   return out(
     block({
       ...header,
       ...(o.decl?.nameless ? { note: NAMELESS_NOTE } : {}),
       refs_total: rows.length,
+      ...(notCalls > 0 ? { not_calls: notCalls } : {}),
       ...callerText.fields,
       files,
       tests,
@@ -642,10 +725,11 @@ function renderCallers(
             })),
           }),
       ...(truncated ? { truncated: true } : {}),
+      ...testRows.fields,
       ...levels,
       ...outside.fields,
       ...scopeFields(o.scope),
-      ...footer(semantic, o.started, fileList),
+      ...foot.fields,
     }),
     helpBlock(help),
   );

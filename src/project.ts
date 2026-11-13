@@ -452,6 +452,15 @@ export interface CallSite extends Location {
   /** Set when the call reaches the Symbol through a base member or names an implementation of it. */
   via?: string;
   through?: Through;
+  /** The Reference is not the callee of a call (a mock setup, an assertion argument, a callback passed on). */
+  notCall?: true;
+}
+
+export interface Diagnostic {
+  file: string;
+  line: number;
+  code: number;
+  message: string;
 }
 
 export interface SemanticProject {
@@ -472,6 +481,8 @@ export interface SemanticProject {
   quickInfo(absFile: string, pos: number): ts.QuickInfo | undefined;
   /** Syntactic + semantic diagnostics; all Project files up to 300, else only `touched`. */
   diagnosticsCount(touched?: readonly string[]): number;
+  /** The diagnostics `diagnosticsCount` counts, in file order. */
+  diagnostics(touched?: readonly string[]): Diagnostic[];
   /** Milliseconds since the project was created. */
   elapsedMs(): number;
 }
@@ -629,7 +640,7 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
     for (const call of calls) {
       for (const span of call.fromSpans) {
         const loc = location(call.from.file, span.start);
-        if (loc) sites.push({ ...loc, caller: callerName(call.from), item: call.from });
+        if (loc) sites.push({ ...loc, caller: callerName(call.from), item: call.from, ...(isCallTarget(call.from.file, span.start) ? {} : { notCall: true as const }) });
       }
     }
     return sites;
@@ -645,6 +656,35 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
       if (!child) return node;
       node = child;
     }
+  };
+
+  const CALL_FORWARDERS = new Set(["call", "apply", "bind"]);
+  const skipOuter = (node: ts.Node): ts.Node => {
+    let n = node;
+    while (n.parent && (ts.isParenthesizedExpression(n.parent) || ts.isNonNullExpression(n.parent) || ts.isAsExpression(n.parent) || ts.isTypeAssertionExpression(n.parent) || ts.isSatisfiesExpression(n.parent))) n = n.parent;
+    return n;
+  };
+  /**
+   * The Reference at `start` is what a call, `new`, tagged template, decorator or JSX tag invokes
+   * (`fn.call/apply/bind` count). The call hierarchy also reports any `x.method` property access.
+   */
+  const isCallTarget = (fileName: string, start: number): boolean => {
+    const sf = program.getSourceFile(fileName);
+    if (!sf) return true;
+    let n: ts.Node = nodeAt(sf, start);
+    const up = n.parent;
+    if (up && ((ts.isPropertyAccessExpression(up) && up.name === n) || (ts.isElementAccessExpression(up) && up.argumentExpression === n))) n = up;
+    n = skipOuter(n);
+    const p = n.parent;
+    if (!p) return false;
+    if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && p.expression === n) return true;
+    if ((ts.isTaggedTemplateExpression(p) && p.tag === n) || ts.isDecorator(p)) return true;
+    if ((ts.isJsxOpeningElement(p) || ts.isJsxSelfClosingElement(p)) && p.tagName === n) return true;
+    if (ts.isPropertyAccessExpression(p) && p.expression === n && CALL_FORWARDERS.has(p.name.text)) {
+      const call = skipOuter(p).parent;
+      return call !== undefined && ts.isCallExpression(call) && skipOuter(p) === call.expression;
+    }
+    return false;
   };
 
   type Member = ts.MethodDeclaration | ts.MethodSignature | ts.PropertyDeclaration | ts.PropertySignature | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.PropertyAssignment;
@@ -871,10 +911,28 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
         const kinds = hits.map((h) => buckets.get(h.key));
         if (kinds.length > 0 && !kinds.includes("direct") && !kinds.includes("via")) continue;
         const viaHit = kinds.includes("direct") ? undefined : hits.find((h) => viaOf.has(h.key));
-        sites.push({ ...loc, caller: callerName(call.from), item: call.from, ...(viaHit ? { via: viaOf.get(viaHit.key)!.via, through: viaOf.get(viaHit.key)!.through } : {}) });
+        sites.push({
+          ...loc,
+          caller: callerName(call.from),
+          item: call.from,
+          ...(isCallTarget(call.from.file, span.start) ? {} : { notCall: true as const }),
+          ...(viaHit ? { via: viaOf.get(viaHit.key)!.via, through: viaOf.get(viaHit.key)!.through } : {}),
+        });
       }
     }
     return sites;
+  };
+
+  // A subgraph program mixes projects under one set of options: only the touched files count there.
+  const diagnosticsOf = (touched: readonly string[]): ts.Diagnostic[] => {
+    const files = !scope && projectFiles.length <= FULL_DIAGNOSTICS_LIMIT ? projectFiles : touched.map((f) => index.abs(f));
+    const result: ts.Diagnostic[] = [];
+    for (const file of files) {
+      const sf = program.getSourceFile(file);
+      if (!sf) continue;
+      result.push(...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf));
+    }
+    return result;
   };
 
   return {
@@ -919,15 +977,18 @@ export function createSemanticProject(index: SyntacticIndex, scope?: ProgramScop
       return service.getQuickInfoAtPosition(absFile, pos);
     },
     diagnosticsCount(touched = []) {
-      // A subgraph program mixes projects under one set of options: count the touched files only.
-      const files = !scope && projectFiles.length <= FULL_DIAGNOSTICS_LIMIT ? projectFiles : touched.map((f) => index.abs(f));
-      let count = 0;
-      for (const file of files) {
-        const sf = program.getSourceFile(file);
-        if (!sf) continue;
-        count += program.getSyntacticDiagnostics(sf).length + program.getSemanticDiagnostics(sf).length;
-      }
-      return count;
+      return diagnosticsOf(touched).length;
+    },
+    diagnostics(touched = []) {
+      return diagnosticsOf(touched).map((d) => {
+        const lc = d.file?.getLineAndCharacterOfPosition(d.start ?? 0);
+        return {
+          file: d.file ? index.rel(resolve(d.file.fileName)) : "-",
+          line: lc ? lc.line + 1 : 0,
+          code: d.code,
+          message: ts.flattenDiagnosticMessageText(d.messageText, " "),
+        };
+      });
     },
     elapsedMs: () => Math.round(performance.now() - started),
   };

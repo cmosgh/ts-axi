@@ -186,7 +186,17 @@ describe("refs", () => {
   it("resolves a position target and counts Test files", async () => {
     const data = toon((await run("refs", "src/services/sync.ts:4")).stdout);
     expect(data).toMatchObject({ symbol: "runSync", kind: "function", tests: 1 });
-    expect((data["refs"] as Payload[]).map((r) => r["file"])).toContain("src/services/sync.test.ts");
+    expect((data["refs"] as Payload[]).map((r) => r["file"])).not.toContain("src/services/sync.test.ts");
+    expect(data["test_refs"]).toEqual([{ file: "src/services/sync.test.ts", count: 2 }]);
+    expect(data["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs src/services/sync.ts:4 --tests` to list the 2 rows in Test files"]));
+  });
+
+  it("--tests lists the Test file rows after the others", async () => {
+    const data = toon((await run("refs", "runSync", "--tests")).stdout);
+    const rows = (data["refs"] as Payload[]).map((r) => r["file"]);
+    expect(rows.at(-1)).toBe("src/services/sync.test.ts");
+    expect(rows).toHaveLength(5);
+    expect(data["test_refs"]).toBeUndefined();
   });
 
   it("--test-glob adds a Test file pattern at run time", async () => {
@@ -195,7 +205,7 @@ describe("refs", () => {
   });
 
   it("--limit cuts rows and keeps the exact total", async () => {
-    const data = toon((await run("refs", "runSync", "--limit", "1")).stdout);
+    const data = toon((await run("refs", "runSync", "--limit", "1", "--tests")).stdout);
     expect(data["refs"]).toHaveLength(1);
     expect(data).toMatchObject({ refs_total: 5, truncated: true });
     expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("--limit 5")]));
@@ -786,7 +796,7 @@ describe("plain JavaScript packages (no tsconfig)", () => {
   });
 
   it("callers follow require('..') through a module.exports = require() shim", async () => {
-    const data = toon((await cjs("callers", "createApp")).stdout);
+    const data = toon((await cjs("callers", "createApp", "--tests")).stdout);
     expect(data).toMatchObject({ declared_at: "lib/app.js:7", refs_total: 3, files: 2, tests: 1 });
     expect((data["refs"] as Payload[]).map((r) => `${r["file"]}:${r["line"]}`)).toEqual(["examples/basic.js:5", "test/app.js:9", "test/app.js:14"]);
   });
@@ -1157,7 +1167,7 @@ describe("workspace (Nx + pnpm fixture)", () => {
   });
 
   it("refs without -P finds uses in every project through the alias and the barrel", async () => {
-    const data = toon((await ws.run("refs", "formatMoney")).stdout);
+    const data = toon((await ws.run("refs", "formatMoney", "--tests")).stdout);
     expect(data).toMatchObject({ declared_at: "libs/shared/src/lib/money.ts:6", tests: 1, files: 4 });
     expect(data["warning"]).toBeUndefined();
     expect(data["scope"]).toMatch(SCOPE);
@@ -1171,7 +1181,7 @@ describe("workspace (Nx + pnpm fixture)", () => {
   });
 
   it("callers excludes the type-only use", async () => {
-    const data = toon((await ws.run("callers", "formatMoney")).stdout);
+    const data = toon((await ws.run("callers", "formatMoney", "--tests")).stdout);
     expect(files(data)).toEqual(["apps/web/src/main.ts", "services/billing/src/invoice.spec.ts", "services/billing/src/invoice.ts"]);
     expect(data["scope"]).toMatch(SCOPE);
   });
@@ -1187,7 +1197,7 @@ describe("workspace (Nx + pnpm fixture)", () => {
   });
 
   it("a references-only tsconfig under -P expands to its lib and spec configs", async () => {
-    const shell = toon((await ws.run("refs", "roundCents", "-P", "libs/shared/tsconfig.json")).stdout);
+    const shell = toon((await ws.run("refs", "roundCents", "-P", "libs/shared/tsconfig.json", "--tests")).stdout);
     expect(shell).toMatchObject({ tsconfig: "libs/shared/tsconfig.json (2 referenced configs)", refs_total: 2, tests: 1 });
     expect(files(shell)).toEqual(["libs/shared/src/lib/money.spec.ts"]);
     const lib = toon((await ws.run("refs", "roundCents", "-P", "libs/shared/tsconfig.lib.json")).stdout);
@@ -1419,7 +1429,7 @@ describe("References through mock mapped types", () => {
 
   it("refs counts every mock shape and keeps a same-named sibling out", async () => {
     const run = runner(fixtureCopy({ fixture: MOCKS_FIXTURE }));
-    const data = toon((await run("refs", "ItemService.findItem")).stdout);
+    const data = toon((await run("refs", "ItemService.findItem", "--tests")).stdout);
     expect(data).toMatchObject({ refs_total: 8, files: 2, tests: 1 });
     const rows = data["refs"] as Payload[];
     expect(specLines(rows)).toEqual(MOCK_LINES);
@@ -1427,11 +1437,22 @@ describe("References through mock mapped types", () => {
     expect(rows.some((r) => r["line"] === 11 || r["line"] === 19)).toBe(false);
   });
 
-  it("callers lists the mock uses with the test function", async () => {
+  it("callers lists calls through mock shapes; mock setup and assertion arguments are not_calls", async () => {
     const run = runner(fixtureCopy({ fixture: MOCKS_FIXTURE }));
-    const rows = toon((await run("callers", "ItemService.findItem")).stdout)["refs"] as Payload[];
-    expect(specLines(rows)).toEqual(MOCK_LINES);
-    expect(rows.find((r) => r["line"] === 6)?.["caller"]).toBe("deepMocked");
+    const data = toon((await run("callers", "ItemService.findItem", "--tests")).stdout);
+    const rows = data["refs"] as Payload[];
+    expect(specLines(rows)).toEqual([7, 13, 14, 15]);
+    expect(rows.find((r) => String(r["file"]).endsWith(".spec.ts") && r["line"] === 7)?.["caller"]).toBe("deepMocked");
+    expect(rows[0]).toMatchObject({ file: "src/items/item.consumer.ts", line: 7 });
+    expect(data).toMatchObject({ refs_total: 5, not_calls: 3 });
+    expect(data["help"]).toEqual(expect.arrayContaining([expect.stringContaining("for the 3 not_calls")]));
+  });
+
+  it("callers collapses Test file calls to a count per file by default", async () => {
+    const run = runner(fixtureCopy({ fixture: MOCKS_FIXTURE }));
+    const data = toon((await run("callers", "ItemService.findItem")).stdout);
+    expect((data["refs"] as Payload[]).map((r) => `${r["file"]}:${r["line"]}`)).toEqual(["src/items/item.consumer.ts:7"]);
+    expect(data["test_refs"]).toEqual([{ file: "src/items/item.consumer.spec.ts", count: 4 }]);
   });
 
   it("impact counts mocking specs as tests of a signature change", async () => {
@@ -1441,5 +1462,66 @@ describe("References through mock mapped types", () => {
     const data = toon((await runner(dir)("impact", "--fields", "all")).stdout);
     const row = (data["changed"] as Payload[]).find((r) => r["symbol"] === "ItemService.findItem");
     expect(row).toMatchObject({ change: "signature", refs_outside: 8, files: 2, tests: 1 });
+  });
+});
+
+describe("callers: call expressions only", () => {
+  const SRC = `export class Svc {
+  run(n: number): number {
+    return n;
+  }
+}
+export function deco(): MethodDecorator {
+  return () => undefined;
+}
+export class Use {
+  constructor(private svc: Svc) {}
+  direct(): number {
+    return this.svc.run(1);
+  }
+  forwarded(): number {
+    return this.svc.run.call(this.svc, 2) + (this.svc.run as (n: number) => number)(3) + this.svc.run!(4);
+  }
+  passed(): number[] {
+    return [1, 2].map(this.svc.run);
+  }
+  read(): unknown {
+    return this.svc.run.name;
+  }
+  @deco()
+  decorated(): void {}
+}
+`;
+  const ENTITY = `export class Scan {\n  processId = "";\n}\nexport class ScanDto {\n  processId = "";\n}\nexport function toDto(s: Scan): ScanDto {\n  return { processId: s.processId };\n}\nexport const broken: number = "x";\n`;
+  let run: (...argv: string[]) => Promise<RunResult>;
+  beforeAll(() => {
+    const dir = fixtureCopy({ fixture: MOCKS_FIXTURE });
+    writeFileSync(join(dir, "src/calls.ts"), SRC);
+    writeFileSync(join(dir, "src/scan.ts"), ENTITY);
+    writeFileSync(join(dir, "tsconfig.json"), readFileSync(join(dir, "tsconfig.json"), "utf8").replace('"strict": true,', '"strict": true,\n    "experimentalDecorators": true,'));
+    run = runner(dir);
+  });
+
+  it("keeps calls, .call/as/! forms and decorators; a passed callback and a property read are not_calls", async () => {
+    const data = toon((await run("callers", "Svc.run")).stdout);
+    expect((data["refs"] as Payload[]).map((r) => r["line"])).toEqual([12, 15, 15, 15]);
+    expect(data).toMatchObject({ refs_total: 4, not_calls: 2 });
+    const deco = toon((await run("callers", "deco")).stdout);
+    expect(deco).toMatchObject({ refs_total: 1 });
+    expect(deco["not_calls"]).toBeUndefined();
+  });
+
+  it("refs of a property names same-named members of other types", async () => {
+    const data = toon((await run("refs", "Scan.processId")).stdout);
+    expect(data["same_name_members"]).toBe("1 (ScanDto.processId)");
+    expect(data["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs ScanDto.processId` for References of the same-named ScanDto.processId"]));
+  });
+
+  it("diagnostics carries a hint; --diagnostics lists them", async () => {
+    const plain = toon((await run("refs", "toDto")).stdout);
+    expect(plain["diagnostics"]).toBe(1);
+    expect(plain["help"]).toEqual(expect.arrayContaining(["Run `ts-axi refs src/scan.ts:7 --diagnostics` to list the 1 TypeScript errors counted in diagnostics"]));
+    const listed = toon((await run("refs", "toDto", "--diagnostics")).stdout);
+    expect(listed["diagnostic_rows"]).toEqual([{ file: "src/scan.ts", line: 10, code: "TS2322", message: "Type 'string' is not assignable to type 'number'." }]);
   });
 });
