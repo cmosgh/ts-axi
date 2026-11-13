@@ -668,14 +668,16 @@ function renderCallers(
   const rows = sortRows(calls.filter((s) => s.via === undefined));
   const via = sortRows(calls.filter((s) => s.via !== undefined));
   const { files, tests, fileList } = summary(opened, rows);
-  const testRows = testSplit(opened, mergedRows<CallSite>(rows, via, o.show), o, "callers");
+  const merged = mergedRows<CallSite>(rows, via, o.show);
+  const testRows = testSplit(opened, merged, o, "callers");
   const listed = testRows.listed;
   const shown = listed.slice(0, o.limit);
   const truncated = shown.length < listed.length;
 
   const levels: Record<string, unknown> = {};
   const visited = new Set<string>();
-  let level = listed;
+  // Deeper levels start from every call, Test files included.
+  let level = merged;
   for (let d = 2; d <= o.depth; d++) {
     level = nextLevel(semantic, level, visited);
     const agg = depthRows(level);

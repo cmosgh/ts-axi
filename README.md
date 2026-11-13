@@ -58,11 +58,11 @@ Known limits: `.astro` / `.vue` / `.svelte` files are not analysed (they appear 
 | task | repo | ts-axi tokens | grep tokens | ratio | recall |
 | --- | --- | ---: | ---: | ---: | --- |
 | def of a class method | astro sample | 117 | 266 | 0.44 | 100% (1/1) |
-| callers of a function | astro sample | 227 | 1169 | 0.19 | 100% (8/8) |
-| refs of a class member | astro sample | 216 | 1133 | 0.19 | 100% (8/8) |
-| impact of a signature change | astro sample | 737 | 1304 | 0.56 | 100% (14/14) |
+| callers of a function | astro sample | 204 | 1169 | 0.17 | 100% (8/8, 3 by count) |
+| refs of a class member | astro sample | 170 | 1133 | 0.15 | 100% (8/8, 5 by count) |
+| impact of a signature change | astro sample | 687 | 1304 | 0.53 | 100% (14/14) |
 | template uses of a directive | legacy-js | 409 | 289 | 1.42 | 100% (5/5) |
-| refs of an untyped CommonJS member | legacy-js | 387 | 401 | 0.96 | 100% (5/5) |
+| refs of an untyped CommonJS member | legacy-js | 369 | 401 | 0.92 | 100% (5/5, 2 by count) |
 
 - def of a class method is over 0.3 - the class file has 36 lines, so the grep side reads all of it once.
 - impact of a signature change is over 0.3 - the followed hint repeats the first output with the extra rows (refs on the changed function); impact alone is 0.33.

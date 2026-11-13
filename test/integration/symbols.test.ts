@@ -143,7 +143,7 @@ describe("def", () => {
 
 describe("refs", () => {
   it("finds every real reference of formatPrice across ts, tsx and js", async () => {
-    const data = await toon("refs", "formatPrice");
+    const data = await toon("refs", "formatPrice", "--tests");
     expect(data).toMatchObject({
       symbol: "formatPrice",
       kind: "function",
@@ -161,10 +161,10 @@ describe("refs", () => {
       "src/components/ProductCard.tsx:13",
       "src/lib/analytics.js:1",
       "src/lib/analytics.js:4",
-      "src/lib/cart.it.ts:2",
-      "src/lib/cart.it.ts:8",
       "src/lib/cart.ts:1",
       "src/lib/cart.ts:34",
+      "src/lib/cart.it.ts:2",
+      "src/lib/cart.it.ts:8",
       "src/lib/format.test.ts:2",
       "src/lib/format.test.ts:6",
       "src/lib/format.test.ts:9",
@@ -183,15 +183,15 @@ describe("refs", () => {
 
 describe("callers", () => {
   it("lists the 8 callers of Cart.total with their enclosing function", async () => {
-    const data = await toon("callers", "Cart.total");
+    const data = await toon("callers", "Cart.total", "--tests");
     expect(data).toMatchObject({ symbol: "Cart.total", declared_at: "src/lib/cart.ts:32", refs_total: 8, files: 5, tests: 3 });
     const rows = rowsOf(data, "refs");
     expect(rows.map((r) => `${r["file"]}:${r["line"]}:${r["caller"]}`)).toEqual([
       "src/components/CartSummary.tsx:6:CartSummary",
       "src/components/CartSummary.tsx:10:addBeans",
+      "src/hooks/useCart.ts:35:useCart",
       "src/hooks/useCart.test.ts:9:(top-level)",
       "src/hooks/useCart.test.ts:15:(top-level)",
-      "src/hooks/useCart.ts:35:useCart",
       "src/lib/cart.it.ts:8:(top-level)",
       "src/lib/cart.spec.ts:8:(top-level)",
       "src/lib/cart.spec.ts:14:(top-level)",
@@ -199,7 +199,7 @@ describe("callers", () => {
   });
 
   it("--depth 2 adds counts of who calls the callers", async () => {
-    const data = await toon("callers", "formatPrice", "--depth", "2");
+    const data = await toon("callers", "formatPrice", "--depth", "2", "--tests");
     expect(rowsOf(data, "refs")).toHaveLength(7);
     const level2 = rowsOf(data, "callers_depth2");
     expect(level2.map((r) => `${r["file"]}:${r["caller"]}:${r["count"]}`)).toEqual([
@@ -288,22 +288,18 @@ describe("components and hooks", () => {
   it("callers reduceCart counts the test file", async () => {
     const data = await toon("callers", "reduceCart");
     expect(data).toMatchObject({ declared_at: "src/hooks/useCart.ts:14", refs_total: 4, files: 2, tests: 1 });
-    expect(rowsOf(data, "refs").map((r) => `${r["file"]}:${r["line"]}:${r["caller"]}`)).toEqual([
-      "src/hooks/useCart.test.ts:9:(top-level)",
-      "src/hooks/useCart.test.ts:13:(top-level)",
-      "src/hooks/useCart.test.ts:14:(top-level)",
-      "src/hooks/useCart.ts:25:useCart",
-    ]);
+    expect(rowsOf(data, "refs").map((r) => `${r["file"]}:${r["line"]}:${r["caller"]}`)).toEqual(["src/hooks/useCart.ts:25:useCart"]);
+    expect(rowsOf(data, "test_refs")).toEqual([{ file: "src/hooks/useCart.test.ts", count: 3 }]);
   });
 
   it("refs CartAction finds the type in useCart.ts and the test", async () => {
-    const data = await toon("refs", "CartAction");
+    const data = await toon("refs", "CartAction", "--tests");
     expect(data).toMatchObject({ kind: "type", declared_at: "src/hooks/useCart.ts:4", refs_total: 4, files: 2, tests: 1 });
     expect(locations(rowsOf(data, "refs"))).toEqual([
-      "src/hooks/useCart.test.ts:3",
-      "src/hooks/useCart.test.ts:12",
       "src/hooks/useCart.ts:14",
       "src/hooks/useCart.ts:27",
+      "src/hooks/useCart.test.ts:3",
+      "src/hooks/useCart.test.ts:12",
     ]);
   });
 
