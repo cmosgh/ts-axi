@@ -1,8 +1,8 @@
 {
   "def of a class method": 0.44,
-  "callers of a function": 0.194,
-  "refs of a class member": 0.191,
-  "impact of a signature change": 0.565,
+  "callers of a function": 0.175,
+  "refs of a class member": 0.15,
+  "impact of a signature change": 0.527,
   "template uses of a directive": 1.415,
-  "refs of an untyped CommonJS member": 0.965
+  "refs of an untyped CommonJS member": 0.92
 }

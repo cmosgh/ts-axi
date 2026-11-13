@@ -28,7 +28,7 @@ import { isFunctionLike, type Declaration, type Kind } from "../symbols.js";
 import { IMPACT_HOPS, scopeFields, scopeHelp, semanticFor } from "../scope.js";
 import { isTemplatePath, loadTemplates, templateTarget, templateUsages, usagesIn, type TemplateFile, type TemplateTarget } from "../templates.js";
 import { walkFiles } from "../walk.js";
-import { contextOf, lineOf, open, projectFields, type Opened } from "./common.js";
+import { contextOf, DIAGNOSTICS_DOC, diagnosticsFields, lineOf, open, projectFields, type Opened } from "./common.js";
 import { outsideFiles } from "./miss.js";
 
 const DEFAULT_LIMIT = 50;
@@ -42,8 +42,8 @@ input:
   (none) = working tree vs HEAD (staged + unstaged + untracked); --staged = index vs HEAD
   <git-range> = any git diff range (main...HEAD, abc123, v1..v2); - = unified diff on stdin (needs the after side checked out)
   analysis is of the current checkout - for a range whose head is not the working tree, check that head out first
-flags[9]:
-  --staged, --size (adds size{files,hunks,lines_added,lines_removed,patch_chars,exported_signature_changes,removed_symbols} - hunks are counted at zero context for a git source, as given for -; untracked files count as added),--via (adds References through an interface or base member to refs[n] with a via column), --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), --fields <kind,exported,refs_total,via,files,tests|all> (extra changed[n] columns), -P <tsconfig>, --json
+flags[10]:
+  --staged, --size (adds size{files,hunks,lines_added,lines_removed,patch_chars,exported_signature_changes,removed_symbols} - hunks are counted at zero context for a git source, as given for -; untracked files count as added),--via (adds References through an interface or base member to refs[n] with a via column), --depth <1-3> (callers_depthN[n]{file,count} for N > 1), --limit <1-${MAX_LIMIT}> (default ${DEFAULT_LIMIT} ref rows across the report), --grep (adds unresolved[n]{file,line,context} - textual matches that are not References; also searches .astro/.vue/.svelte/.mdx/.html), --test-glob <glob> (repeatable), --fields <kind,exported,refs_total,via,files,tests|all> (extra changed[n] columns), --diagnostics (lists the TypeScript errors behind diagnostics), -P <tsconfig>, --json
 output:
   base, head, changes (count), changed[n]{symbol,change,at,refs_outside} by default; --fields adds columns in place, --fields all gives {symbol,kind,change,exported,at,refs_total,refs_outside,via,files,tests}
   change = signature | removed | type | added | body | modified (before unavailable) - riskiest first
@@ -58,6 +58,7 @@ output:
   skipped[n]{file,reason} = files in the diff that were not analysed (.astro, .json, outside the Project)
   tests: 0 on an exported signature or body change = no Test file references it (columns from --fields exported,tests)
   scope = in a monorepo without -P the program is the touched files + two levels of importers (scope_partial: true when capped)
+  ${DIAGNOSTICS_DOC}
 examples[6]:
   ts-axi impact
   ts-axi impact --staged
@@ -76,6 +77,7 @@ const SPECS = [
   { name: "--test-glob", repeatable: true },
   { name: "--fields" },
   { name: "--size", boolean: true },
+  { name: "--diagnostics", boolean: true },
   { name: "-P" },
 ];
 
@@ -539,7 +541,7 @@ function depthLevels(semantic: SemanticProject, rows: Row[], depth: number): Rec
   if (depth < 2) return levels;
   let level: CallSite[] = [];
   for (const row of rows) {
-    if (row.live && isFunctionLike(row.kind)) level.push(...(semantic.incomingCalls(semantic.index.abs(row.live.file), row.live.namePos) ?? []));
+    if (row.live && isFunctionLike(row.kind)) level.push(...(semantic.incomingCalls(semantic.index.abs(row.live.file), row.live.namePos) ?? []).filter((s) => !s.notCall));
   }
   const visited = new Set<string>();
   for (let d = 2; d <= depth; d++) {
@@ -548,7 +550,7 @@ function depthLevels(semantic: SemanticProject, rows: Row[], depth: number): Rec
     level = [];
     for (const [key, site] of items) {
       visited.add(key);
-      level.push(...semantic.incomingCallsOf(site.item));
+      level.push(...semantic.incomingCallsOf(site.item).filter((s) => !s.notCall));
     }
     const counts = new Map<string, number>();
     for (const site of level) counts.set(site.file, (counts.get(site.file) ?? 0) + 1);
@@ -861,7 +863,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   const unresolved = grep ? withTemplateRows(textRows, rows, templateFiles ?? []) : [];
 
   const touched = [...new Set([...analysed.filter((f) => f.status !== "deleted").map((f) => f.path), ...listed.flatMap((r) => r.outside.map((e) => e.file))])];
-  const diagnostics = semantic.diagnosticsCount(touched);
+  const diagnostics = diagnosticsFields(semantic, touched, bool(parsed, "--diagnostics"), rerun(arg, parsed, "--diagnostics"));
 
   // --- Help ---
   const help: string[] = [];
@@ -891,6 +893,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
   const specHint = specFilesHint(ctx.cwd, opened, skipped, listed.every((r) => fileCounts(r).tests === 0));
   if (specHint) help.push(specHint);
   help.push(...scopeHelp(scope));
+  help.push(...diagnostics.help);
   const notes = rows
     .filter((r) => r.change.change === "signature" && r.bases.length > 0)
     .map((r) => ({ symbol: r.symbol, note: `implements ${r.bases.join(" and ")}` }));
@@ -931,7 +934,7 @@ export async function impactCommand(args: string[], ctx: CommandContext): Promis
       ...skippedBlock,
       ...scopeFields(scope),
       elapsed_ms: Math.round(performance.now() - started),
-      ...(diagnostics > 0 ? { diagnostics } : {}),
+      ...diagnostics.fields,
     }),
     helpBlock(help),
   );

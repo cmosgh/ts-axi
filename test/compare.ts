@@ -131,8 +131,10 @@ interface Location {
 }
 
 /** Every file:line the outputs list, and the largest textual + template count any of them prints. */
-function axiLocations(outputs: string[]): { listed: Set<string>; counted: number } {
+function axiLocations(outputs: string[]): { listed: Set<string>; counted: number; perFile: Map<string, number> } {
   const listed = new Set<string>();
+  // test_refs{file,count}: Test file rows collapsed to a count per file.
+  const perFile = new Map<string, number>();
   let counted = 0;
   for (const stdout of outputs) {
     const fence = stdout.indexOf("\n---\n");
@@ -156,10 +158,13 @@ function axiLocations(outputs: string[]): { listed: Set<string>; counted: number
         if (row["file"] !== undefined && row["line"] !== undefined) listed.add(`${row["file"]}:${row["line"]}`);
       }
     }
+    for (const row of Array.isArray(data["test_refs"]) ? (data["test_refs"] as Record<string, unknown>[]) : []) {
+      perFile.set(String(row["file"]), Math.max(perFile.get(String(row["file"])) ?? 0, Number(row["count"])));
+    }
     const n = (v: unknown) => (typeof v === "string" ? Number(/^(\d+)/.exec(v)?.[1] ?? 0) : 0);
     counted = Math.max(counted, n(data["textual"]) + n(data["templates"]));
   }
-  return { listed, counted };
+  return { listed, counted, perFile };
 }
 
 // ---------------------------------------------------------------- grep workflow
@@ -417,7 +422,7 @@ export function targetsOf(axiOutputs: string[]): Set<string> {
 
 /** Which grep hits that are real uses the ts-axi outputs list, count, or miss. */
 export function recallOf(axiOutputs: string[], grepHits: Hit[], task: Task): Recall {
-  const { listed, counted } = axiLocations(axiOutputs);
+  const { listed, counted, perFile } = axiLocations(axiOutputs);
   const seen = new Set<string>();
   const hits = grepHits.filter((h) => {
     const key = `${h.file}:${h.line}`;
@@ -427,15 +432,23 @@ export function recallOf(axiOutputs: string[], grepHits: Hit[], task: Task): Rec
   });
   const notListed = hits.filter((h) => !listed.has(`${h.file}:${h.line}`));
   const listedHits = hits.length - notListed.length;
-  const unlisted = notListed.filter((h) => !h.inDiff);
+  // A per-file count covers that many of the file's hits.
+  const fileBudget = new Map(perFile);
+  const byFile = notListed.filter((h) => {
+    const left = fileBudget.get(h.file) ?? 0;
+    if (h.inDiff || left === 0) return false;
+    fileBudget.set(h.file, left - 1);
+    return true;
+  });
+  const unlisted = notListed.filter((h) => !h.inDiff && !byFile.includes(h));
   // A count covers what it counts beyond the rows already listed, never more.
   const byCount = unlisted.length <= Math.max(0, counted - listedHits) ? unlisted.length : 0;
   const missingHits = byCount ? [] : unlisted;
   return {
     hits: hits.length,
     listed: listedHits,
-    counted: byCount,
-    inDiff: notListed.length - unlisted.length,
+    counted: byCount + byFile.length,
+    inDiff: notListed.filter((h) => h.inDiff).length,
     missing: missingHits.map((h) => `${h.file}:${h.line}: ${h.text.trim()}`),
     missingHits,
   };

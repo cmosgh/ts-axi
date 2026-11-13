@@ -9,7 +9,7 @@ import ts from "typescript";
 import { enumFlag, flag, flags, type FlagSpec, type ParsedArgs, bool } from "../args.js";
 import { usageError } from "../errors.js";
 import { hasGlobMagic, matchesGlob } from "../glob.js";
-import { openProject, type ProjectContext, type SyntacticIndex } from "../project.js";
+import { openProject, type ProjectContext, type SemanticProject, type SyntacticIndex } from "../project.js";
 import { loadSettings, type Settings } from "../settings.js";
 import { byDepthThenPath } from "../walk.js";
 import {
@@ -425,3 +425,27 @@ export function lineOf(text: string | undefined, line: number): string {
 }
 
 export { clip, hasGlobMagic };
+
+const DIAGNOSTIC_ROWS = 20;
+
+/** Help text for `diagnostics` and `--diagnostics`, shared by refs, callers and impact. */
+export const DIAGNOSTICS_DOC = "diagnostics: n = TypeScript errors (syntax + type) in the analysed files - the whole Project up to 300 files, else the files with results; they rarely change the result, but an unresolved import there can hide References; --diagnostics lists them";
+
+/**
+ * `diagnostics: n`, plus `diagnostic_rows` under `--diagnostics`, or a hint to list them.
+ * `rerun` is the same command with `--diagnostics` added.
+ */
+export function diagnosticsFields(semantic: SemanticProject, touched: readonly string[], show: boolean, rerun: string): { fields: Record<string, unknown>; help: string[] } {
+  if (!show) {
+    const n = semantic.diagnosticsCount(touched);
+    return n === 0 ? { fields: {}, help: [] } : { fields: { diagnostics: n }, help: [`Run \`${rerun}\` to list the ${n} TypeScript errors counted in diagnostics`] };
+  }
+  const rows = semantic.diagnostics(touched);
+  return {
+    fields: {
+      diagnostics: rows.length,
+      ...(rows.length > 0 ? { diagnostic_rows: rows.slice(0, DIAGNOSTIC_ROWS).map((d) => ({ file: d.file, line: d.line, code: `TS${d.code}`, message: clip(d.message, CONTEXT_MAX) })) } : {}),
+    },
+    help: rows.length > DIAGNOSTIC_ROWS ? [`Showing ${DIAGNOSTIC_ROWS} of ${rows.length} diagnostics; run \`tsc --noEmit\` in the Project for all`] : [],
+  };
+}
